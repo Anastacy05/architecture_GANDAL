@@ -1,0 +1,60 @@
+---
+- name: Configuration pfSense avec DHCP Relay
+  hosts: pfsense
+  gather_facts: false
+
+  vars:
+    ansible_python_interpreter: /usr/local/bin/python3.11
+    # Reconstruit la liste depuis le JSON passé par Terraform
+    vnet_configs: "{{ vnet_configs_json | from_json }}"
+
+  tasks:
+    # --- PHASE 1 : Découverte des interfaces ---
+    - name: Découvrir interfaces et MAC
+      ansible.builtin.shell: |
+        ifconfig -a | grep -E '^[a-z]|ether' | paste - - | awk '{print $1, $NF}' | sed 's/://g'
+      register: ifconfig_output
+      changed_when: false
+
+    - name: Construire mapping MAC -> Interface
+      ansible.builtin.set_fact:
+        mac_to_interface: >-
+          {{
+            dict(
+              ifconfig_output.stdout_lines | map('split') | map(attribute=1)
+              | zip(
+                  ifconfig_output.stdout_lines | map('split') | map(attribute=0)
+                )
+            )
+          }}
+
+    # --- PHASE 2 : DÉSACTIVER tous les serveurs DHCP natifs ---
+    - name: Désactiver le serveur DHCP natif sur toutes les interfaces
+      ansible.builtin.shell: |
+        pfSsh.php playback disabledhcpd
+      register: disable_dhcp
+      changed_when: true
+
+    # --- PHASE 3 : Configurer les interfaces ---
+    - name: Configurer IP statiques sur les VNETs
+      pfsensible.core.pfsense_interface:
+        interface: "{{ mac_to_interface[item.mac | replace(':', '') | lower] }}"
+        descr: "{{ item.name }}"
+        enable: true
+        ipv4_type: static
+        ipv4_address: "{{ item.ip_y }}"
+        ipv4_prefixlen: "{{ item.prefix }}"
+      loop: "{{ vnet_configs }}"
+
+    # --- PHASE 4 : ACTIVER le DHCP Relay ---
+    - name: Générer le script PHP du relay avec les vraies interfaces
+      ansible.builtin.template:
+        src: templates/enable_dhcp_relay.php.j2
+        dest: /tmp/enable_dhcp_relay.php
+        mode: '0644'
+
+    - name: Exécuter activation du relay
+      ansible.builtin.shell: |
+        pfSsh.php playback /tmp/enable_dhcp_relay.php
+      register: relay_result
+      changed_when: true

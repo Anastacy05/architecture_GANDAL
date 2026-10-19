@@ -1,0 +1,24 @@
+<?php
+require_once("config.inc");
+require_once("services.inc");
+
+global $config;
+
+// Active le service relay
+$config['dhcrelay']['enable'] = true;
+
+// Downstream : toutes les interfaces sauf celle du VNET services
+$config['dhcrelay']['interface'] = [
+{% for item in vnet_configs if item.role != 'services' %}
+    '{{ mac_to_interface[item.mac | replace(':', '') | lower] }}',
+{% endfor %}
+];
+
+// Upstream : IP de la VM DHCP dans le VNET services
+$config['dhcrelay']['server'] = ['{{ dhcp_server_ip }}'];
+
+$config['dhcrelay']['agentoption'] = false;
+
+write_config("DHCP Relay activé");
+services_dhcrelay_configure();
+?>

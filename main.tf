@@ -36,35 +36,61 @@ data "xenorchestra_pool" "pool" {
 locals {
   vnets = {
     services = {
-      ip   = "10.0.20.1/24"
-      name = "Vnet-Services"
+      ip     = "10.0.20.0/24"
+      name   = "Vnet-Services"
+      mac    = "02:00:00:00:00:01"
+      ip_y   = "10.0.20.1"
+      prefix = "24"
+      role   = "services"
     }
     management = {
-      ip   = "10.0.30.1/24"
-      name = "Vnet-Management"
+      ip     = "10.0.30.0/24"
+      name   = "Vnet-Management"
+      mac    = "02:00:00:00:00:02"
+      ip_y   = "10.0.30.1"
+      prefix = "24"
+      role   = "management"
     }
     observation = {
-      ip   = "10.0.40.1/24"
-      name = "Vnet-Observation"
+      ip     = "10.0.40.0/24"
+      name   = "Vnet-Observation"
+      mac    = "02:00:00:00:00:03"
+      ip_y   = "10.0.40.1"
+      prefix = "24"
+      role   = "observation"
     }
     dmz = {
-      ip   = "10.0.50.1/24"
-      name = "Vnet-DMZ"
+      ip     = "10.0.50.0/24"
+      name   = "Vnet-DMZ"
+      mac    = "02:00:00:00:00:04"
+      ip_y   = "10.0.50.1"
+      prefix = "24"
+      role   = "dmz"
     }
     vpn = {
-      ip   = "10.0.60.1/24"
-      name = "Vnet-VPN"
+      ip     = "10.0.60.0/24"
+      name   = "Vnet-VPN"
+      mac    = "02:00:00:00:00:05"
+      ip_y   = "10.0.60.1"
+      prefix = "24"
+      role   = "vpn"
     }
   }
 
   tenants = {
-    for i in range(1, 51) :
+    for i in range(1, 21) :
     "tenant${i}" => {
-      ip   = "10.0.${100 + i}.1/24"
-      name = "Vnet-Tenant-${i}"
+      ip     = "10.0.${100 + i}.0/24"
+      name   = "Vnet-Tenant-${i}"
+      # 02:00:00:01:00:XX -> XX = numéro du tenant en hexa (01..14)
+      mac    = format("02:00:00:01:00:%02x", i)
+      ip_y   = "10.0.${100 + i}.1"
+      prefix = "24"
+      role   = "tenant${i}"
     }
   }
 
+  # Fusion propre pour Terraform
   all_vnets = merge(local.vnets, local.tenants)
 }
 
@@ -88,6 +114,11 @@ module routeur {
 module services {
   source = "./modules/services"
   pool = data.xenorchestra_pool.pool.id
+  dhcp_vnets = {
+    for k, v in local.all_vnets : k => v
+    if startswith(v.role, "tenant") || v.role == "vpn"
+  }
+  all_vnets = local.all_vnets
 }
 
 module portail {
