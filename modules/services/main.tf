@@ -13,7 +13,7 @@ terraform {
 # =========================================================================
 
 data "xenorchestra_template" "debian" {
-  name_label = "Service-Template-Base"
+  name_label = "Debian-Template-Base"
   pool_id    = var.pool
 }
 
@@ -21,43 +21,24 @@ data "xenorchestra_sr" "sr_local" {
   name_label = "Local Storage"
   pool_id    = var.pool
 }
-
-data "xenorchestra_network" "vnet_service" {
-  name_label = "Vnet-Services"
-}
-
-data "xenorchestra_network" "vnet_dmz" {
-  name_label = "Vnet-DMZ"
-}
-
 locals {
 
-  dhcp_keys_sorted = sort(keys(var.dhcp_vnets))
+  dhcp_keys = keys(var.dhcp_vnets)
 
   subnets_kea = [
-    for key in local.dhcp_keys_sorted : {
+    for key in local.dhcp_keys : {
       subnet = var.dhcp_vnets[key].ip
       pools  = [{
-        pool = "${cidrhost(var.dhcp_vnets[key].ip, 50)} - ${cidrhost(var.dhcp_vnets[key].ip, 200)}"
+        pool = "${cidrhost(var.dhcp_vnets[key].ip, 11)} - ${cidrhost(var.dhcp_vnets[key].ip, 254)}"
       }]
       option-data = [
-        { name = "routers", data = var.dhcp_vnets[key].ip_y },
-        { name = "domain-name-servers", data = "10.0.20.2" },
+        { name = "routers", data = var.var.dhcp_vnets[key].ip_emi },
+        { name = "domain-name-servers", data = "10.0.10.14, 10.0.10.15, 10.0.10.16" },
         { name = "domain-name", data = "gandal.internal", always-send = true }
       ]
       user-context = { description = var.dhcp_vnets[key].name }
     }
   ]
-
-  kea_config = jsonencode({
-    Dhcp4 = {
-      "interfaces-config" = { interfaces = ["*"] }
-      "control-socket"    = { "socket-type" = "unix", "socket-name" = "/tmp/kea4-ctrl-socket" }
-      "lease-database"    = { type = "memfile", "lfc-interval" = 3600 }
-      "valid-lifetime"    = 4000
-      subnet4             = local.subnets_kea
-    }
-  })
 
   bind_allowed_cidrs = [for v in values(var.all_vnets) : v.ip]
   bind_allowed_str   = join("; ", concat(local.bind_allowed_cidrs, ["localhost"]))
@@ -65,28 +46,22 @@ locals {
 
 
 # =========================================================================
-# VMs
+# 3 VM POUR LE DNS
 # =========================================================================
 
 
 resource "xenorchestra_vm" "vm_dns" {
 
   name_label = "VM-DNS"
-
   name_description = "VM DNS créée avec Terraform"
+  host = var.hosts[ 0 % length(var.hosts) ]
 
   template = data.xenorchestra_template.debian.id
-
   cpus       = 1
-  memory_max = 1073741824 # 1 Go
+  memory_max = 4 * 1073741824
   hvm_boot_firmware = "bios"
-
-  # -----------------------------------------------------------------------
-  # RÉSEAU & CLOUD-INIT
-  # -----------------------------------------------------------------------
-
   network {
-      network_id  = data.xenorchestra_network.vnet_service.id
+      network_id  = var.network_id
   }
 
   cloud_config = <<-EOF
@@ -102,47 +77,50 @@ resource "xenorchestra_vm" "vm_dns" {
 
       write_files:
         - path: /etc/bind/named.conf.options
+          defer: true
           content: |
             options {
                 directory "/var/cache/bind";
                 recursion yes;
                 listen-on { any; };
-                listen-on-v6 { none; };
-                // Adaptez à votre ou vos VNets
+                listen-on-v6 { any; };
                 allow-query {${local.bind_allowed_str}; };
                 allow-recursion {${local.bind_allowed_str}; };
+                allow-transfer { 10.0.10.15; 10.0.10.16; };
+                also-notify { 10.0.10.15; 10.0.10.16; };
                 forwarders { 8.8.8.8; 1.1.1.1; };
                 dnssec-validation auto;
                 auth-nxdomain no;
             };
         - path: /etc/bind/named.conf.local
+          defer: true
           content: |
             zone "gandal.internal" {
                 type master;
                 file "/etc/bind/db.gandal.internal";
-                allow-transfer { none; };
             };
         - path: /etc/bind/db.gandal.internal
           content: |
             $TTL    604800
-            @       IN      SOA     ns1.gandal.internal. admin.gandal.internal. (
-                                          2024010101 ; Serial
-                                              604800 ; Refresh
-                                                86400 ; Retry
-                                              2419200 ; Expire
-                                              604800 ) ; Negative Cache TTL
+            @       IN      SOA     dns-1.gandal.internal. admin.gandal.internal. (
+                                              1       ; Serial
+                                         604800       ; Refresh
+                                          86400       ; Retry
+                                        2419200       ; Expire
+                                         604800 )     ; Negative Cache TTL
             ;
-            @        IN      NS      ns1.gandal.internal.
-            ns1      IN      A       10.0.20.2
-            dhcp     IN      A       10.0.20.3
-            netbox   IN      A       10.0.20.4
+            @        IN      NS      dns-1.gandal.internal.
+            dns-1    IN      A       10.0.10.14
+            dns-2    IN      A       10.0.10.15
+            dns-3    IN      A       10.0.10.16
+            dhcp-1   IN      A       10.0.10.12
+            dhcp-2   IN      A       10.0.10.13
+            netbox   IN      A       10.0.10.11
 
       runcmd:
-        - named-checkconf
         - systemctl restart bind9
         - systemctl enable bind9
   EOF
-  # les configurations dns a inserer ici
 
   cloud_network_config = <<-EOF
       version: 1
@@ -151,13 +129,9 @@ resource "xenorchestra_vm" "vm_dns" {
         name: enX0
         subnets:
           - type: static
-            address: 10.0.20.2/24
-            gateway: 10.0.20.1/24
+            address: 10.0.10.14/24
+            gateway: 10.0.10.1
   EOF	
-
-  # -----------------------------------------------------------------------
-  # DISQUE
-  # -----------------------------------------------------------------------
 
   disk {
     name_label = "VM-DNS-disk"
@@ -167,72 +141,53 @@ resource "xenorchestra_vm" "vm_dns" {
   
 }
 
+resource "xenorchestra_vm" "vm_dns2" {
 
-resource "xenorchestra_vm" "vm_dhcp" {
-
-  name_label = "VM-DHCP"
-
-  name_description = "VM DHCP créée avec Terraform"
+  name_label = "VM-DNS-2"
+  name_description = "VM DNS secondaire créée avec Terraform"
+  host = var.hosts[ 1 % length(var.hosts) ]
 
   template = data.xenorchestra_template.debian.id
-
   cpus       = 1
-  memory_max = 1073741824 # 1 Go
+  memory_max = 4 * 1073741824
   hvm_boot_firmware = "bios"
-
-  # -----------------------------------------------------------------------
-  # RÉSEAU & CLOUD-INIT
-  # -----------------------------------------------------------------------
-
   network {
-      network_id  = data.xenorchestra_network.vnet_service.id
+      network_id  = var.network_id
   }
 
   cloud_config = <<-EOF
       #cloud-config
-      hostname: VM-DHCP
+      hostname: VM-DNS-2
       manage_etc_hosts: true
 
       package_update: true
       packages:
-        - curl
-        - gnupg
-        - apt-transport-https
+        - bind9
+        - bind9utils
+        - dnsutils
+
+      write_files:
+        - path: /etc/bind/named.conf.options
+          defer: true
+          content: |
+            options {
+                directory "/var/cache/bind";
+                recursion yes;
+                allow-transfer { none; };
+                also-notify { none; };
+            };
+        - path: /etc/bind/named.conf.local
+          content: |
+            zone "gandal.internal" {
+                type slave;
+                masters { 10.0.10.14; }
+                file "/etc/bind/db.gandal.internal";
+            };
 
       runcmd:
-        - curl -1sLf 'https://dl.cloudsmith.io/public/isc/kea-2-6/setup.deb.sh' | bash
-        - apt-get update
-        - apt-get install -y isc-kea-common isc-kea-dhcp4-server isc-kea-ctrl-agent
-
-        # === CONFIGURATION KEA DHCPv4 ===
-        # C'est ICI que vous déclarez vos VNets, plages et options.
-        - |
-          cat > /etc/kea/kea-dhcp4.conf <<'KEAEOF'
-          ${local.kea_config}
-          KEAEOF
-
-        # === CONFIGURATION CONTROL AGENT (pour NetBox) ===
-        - |
-          cat > /etc/kea/kea-ctrl-agent.conf <<'CEOF'
-          {
-            "Control-agent": {
-              "http-host": "0.0.0.0",
-              "http-port": 8000,
-              "control-sockets": {
-                "dhcp4": {
-                  "socket-type": "unix",
-                  "socket-name": "/tmp/kea4-ctrl-socket"
-                }
-              }
-            }
-          }
-          CEOF
-
-        - systemctl restart isc-kea-dhcp4-server
-        - systemctl enable isc-kea-dhcp4-server
-        - systemctl restart isc-kea-ctrl-agent
-        - systemctl enable isc-kea-ctrl-agent
-        EOF
+        - systemctl restart bind9
+        - systemctl enable bind9
+  EOF
 
   cloud_network_config = <<-EOF
       version: 1
@@ -241,16 +196,78 @@ resource "xenorchestra_vm" "vm_dhcp" {
         name: enX0
         subnets:
           - type: static
-            address: 10.0.20.3/24
-            gateway: 10.0.20.1/24
+            address: 10.0.10.15/24
+            gateway: 10.0.10.1
   EOF	
 
-  # -----------------------------------------------------------------------
-  # DISQUE
-  # -----------------------------------------------------------------------
+  disk {
+    name_label = "VM-DNS-2-disk"
+    sr_id      = data.xenorchestra_sr.sr_local.id
+    size       = 10 * 1024 * 1024 * 1024
+  }
+  
+}
+resource "xenorchestra_vm" "vm_dns3" {
+
+  name_label = "VM-DNS-3"
+  name_description = "VM DNS secondaire créée avec Terraform"
+  host = var.hosts[ 2 % length(var.hosts) ]
+
+  template = data.xenorchestra_template.debian.id
+  cpus       = 1
+  memory_max = 4 * 1073741824
+  hvm_boot_firmware = "bios"
+  network {
+      network_id  = var.network_id
+  }
+
+  cloud_config = <<-EOF
+      #cloud-config
+      hostname: VM-DNS-3
+      manage_etc_hosts: true
+
+      package_update: true
+      packages:
+        - bind9
+        - bind9utils
+        - dnsutils
+
+      write_files:
+        - path: /etc/bind/named.conf.options
+          defer: true
+          content: |
+            options {
+                directory "/var/cache/bind";
+                recursion yes;
+                allow-transfer { none; };
+                also-notify { none; };
+            };
+        - path: /etc/bind/named.conf.local
+          content: |
+            zone "gandal.internal" {
+                type slave;
+                masters { 10.0.10.14; }
+                file "/etc/bind/db.gandal.internal";
+            };
+
+      runcmd:
+        - systemctl restart bind9
+        - systemctl enable bind9
+  EOF
+
+  cloud_network_config = <<-EOF
+      version: 1
+      config:
+      - type: physical
+        name: enX0
+        subnets:
+          - type: static
+            address: 10.0.10.16/24
+            gateway: 10.0.10.1
+  EOF	
 
   disk {
-    name_label = "VM-DHCP-disk"
+    name_label = "VM-DNS-3-disk"
     sr_id      = data.xenorchestra_sr.sr_local.id
     size       = 10 * 1024 * 1024 * 1024
   }
@@ -258,24 +275,221 @@ resource "xenorchestra_vm" "vm_dhcp" {
 }
 
 
-resource "xenorchestra_vm" "vm_netbox" {
+# =========================================================================
+# 2 VM EN HA POUR LE DHCP
+# =========================================================================
 
-  name_label = "VM-NetBox"
 
-  name_description = "VM NetBox créée avec Terraform"
+resource "xenorchestra_vm" "vm_dhcp1" {
+
+  name_label = "VM-DHCP-1"
+  name_description = "VM DHCP créée avec Terraform"
+  host = var.hosts[ 3 % length(var.hosts) ]
 
   template = data.xenorchestra_template.debian.id
+  cpus       = 1
+  memory_max = 4 * 1073741824
+  hvm_boot_firmware = "bios"
+  network {
+      network_id  = var.network_id
+  }
 
+  cloud_config = <<-EOF
+      #cloud-config
+      hostname: VM-DHCP-1
+      manage_etc_hosts: true
+
+      package_update: true
+      packages:
+        - kea-dhcp4-server
+        - kea-admin
+
+      write_files:
+        - path: /etc/kea/kea-dhcp4.conf
+          defer: true
+          content: |
+            Dhcp4 = {
+              interfaces-config   = { interfaces = ["*"] }
+              control-socket      = { "socket-type" = "unix", "socket-name" = "kea4-ctrl-socket" }
+              lease-database      = { type = "memfile", "lfc-interval" = 3600 }
+              valid-lifetime      = 4000
+              subnet4             = ${local.subnets_kea}
+              multi-threading: {
+                enable-multi-threading: true,
+                http-dedicated-listener: true,
+                http-listener-threads: 0,
+                http-client-threads: 0
+              }
+              hooks-libraries: [
+                {
+                  library: "/usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp_lease_cmds.so"
+                },
+                {
+                  library": "/usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp_ha.so",
+                  parameters: {
+                    high-availability: [
+                      {
+                        this-server-name: "VM-DHCP-1",
+                        mode: "hot-standby",
+                        heartbeat-delay: 10000,
+                        max-response-delay: 60000
+                        peers: [
+                          {
+                            name: "VM-DHCP-1",
+                            url: "http://10.0.10.12:8000/",
+                            role: "primary",
+                            auto-failover: true
+                          },
+                          {
+                            name: "VM-DHCP-2",
+                            url: "http://10.0.10.13:8000/",
+                            role: "standby",
+                            auto-failover: true
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+
+      runcmd:
+        - systemctl restart kea-dhcp4-server
+        - systemctl enable kea-dhcp4-server
+  EOF
+
+  cloud_network_config = <<-EOF
+      version: 1
+      config:
+      - type: physical
+        name: enX0
+        subnets:
+          - type: static
+            address: 10.0.10.12/24
+            gateway: 10.0.10.1
+  EOF	
+  disk {
+    name_label = "VM-DHCP1-disk"
+    sr_id      = data.xenorchestra_sr.sr_local.id
+    size       = 10 * 1024 * 1024 * 1024
+  }
+  
+}
+
+resource "xenorchestra_vm" "vm_dhcp2" {
+
+  name_label = "VM-DHCP-2"
+  name_description = "VM DHCP créée avec Terraform"
+  host = var.hosts[ 4 % length(var.hosts) ]
+
+  template = data.xenorchestra_template.debian.id
   cpus       = 1
   memory_max = 1073741824 # 1 Go
   hvm_boot_firmware = "bios"
-
-  # -----------------------------------------------------------------------
-  # RÉSEAU & CLOUD-INIT
-  # -----------------------------------------------------------------------
-
   network {
-      network_id  = data.xenorchestra_network.vnet_service.id
+      network_id  = var.network_id
+  }
+
+  cloud_config = <<-EOF
+      #cloud-config
+      hostname: VM-DHCP-2
+      manage_etc_hosts: true
+
+      package_update: true
+      packages:
+        - kea-dhcp4-server
+        - kea-admin
+
+      write_files:
+        - path: /etc/kea/kea-dhcp4.conf
+          defer: true
+          content: |
+            Dhcp4 = {
+              interfaces-config   = { interfaces = ["*"] }
+              control-socket      = { "socket-type" = "unix", "socket-name" = "kea4-ctrl-socket" }
+              lease-database      = { type = "memfile", "lfc-interval" = 3600 }
+              valid-lifetime      = 4000
+              subnet4             = ${local.subnets_kea}
+              multi-threading: {
+                enable-multi-threading: true,
+                http-dedicated-listener: true,
+                http-listener-threads: 0,
+                http-client-threads: 0
+              }
+              hooks-libraries: [
+                {
+                  library: "/usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp_lease_cmds.so"
+                },
+                {
+                  library: "/usr/lib/x86_64-linux-gnu/kea/hooks/libdhcp_ha.so",
+                  parameters: {
+                    high-availability: [
+                      {
+                        this-server-name: "VM-DHCP-2",
+                        mode: "hot-standby",
+                        peers: [
+                          {
+                            name: "VM-DHCP-1",
+                            url: "http://10.0.10.12:8000/",
+                            role: "primary",
+                            auto-failover: true
+                          },
+                          {
+                            name: "VM-DHCP-2",
+                            url: "http://10.0.10.13:8000/",
+                            role: "standby",
+                            auto-failover: true
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+
+      runcmd:
+        - systemctl restart kea-dhcp4-server
+        - systemctl enable kea-dhcp4-server
+  EOF
+
+  cloud_network_config = <<-EOF
+      version: 1
+      config:
+      - type: physical
+        name: enX0
+        subnets:
+          - type: static
+            address: 10.0.10.13/24
+            gateway: 10.0.10.1
+  EOF	
+  disk {
+    name_label = "VM-DHCP-2-disk"
+    sr_id      = data.xenorchestra_sr.sr_local.id
+    size       = 10 * 1024 * 1024 * 1024
+  }
+  
+}
+
+
+# =========================================================================
+# 1 VM POUR NETBOX
+# =========================================================================
+
+
+resource "xenorchestra_vm" "vm_netbox" {
+
+  name_label = "VM-NetBox"
+  name_description = "VM NetBox créée avec Terraform"
+  host = var.hosts[ 5 % length(var.hosts) ]
+
+  template = data.xenorchestra_template.debian.id
+  cpus       = 1
+  memory_max = 1073741824 # 1 Go
+  hvm_boot_firmware = "bios"
+  network {
+      network_id  = var.network_id
   }
 
   cloud_config = <<-EOF
@@ -354,7 +568,6 @@ resource "xenorchestra_vm" "vm_netbox" {
         - rm -f /etc/nginx/sites-enabled/default
         - systemctl restart nginx
   EOF
-  # les configurations netbox a inserer ici
 
   cloud_network_config = <<-EOF
       version: 1
@@ -363,118 +576,11 @@ resource "xenorchestra_vm" "vm_netbox" {
         name: enX0
         subnets:
           - type: static
-            address: 10.0.20.4/24
-            gateway: 10.0.20.1/24
+            address: 10.0.10.11/24
+            gateway: 10.0.10.1
   EOF	
-
-  # -----------------------------------------------------------------------
-  # DISQUE
-  # -----------------------------------------------------------------------
-
   disk {
     name_label = "VM-NetBox-disk"
-    sr_id      = data.xenorchestra_sr.sr_local.id
-    size       = 10 * 1024 * 1024 * 1024
-  }
-  
-}
-
-resource "xenorchestra_vm" "vm_keycloak" {
-
-  name_label = "VM-KeyCloak"
-
-  name_description = "VM KeyCloak créée avec Terraform"
-
-  template = data.xenorchestra_template.debian.id
-
-  cpus       = 1
-  memory_max = 1073741824 # 1 Go
-  hvm_boot_firmware = "bios"
-
-  # -----------------------------------------------------------------------
-  # RÉSEAU & CLOUD-INIT
-  # -----------------------------------------------------------------------
-
-  network {
-      network_id  = data.xenorchestra_network.vnet_service.id
-  }
-
-  cloud_config = <<-EOF
-      #cloud-config
-
-      hostname: VM-KeyCloak
-      manage_etc_hosts: true
-  EOF
-  # les configurations keycloak a inserer ici
-
-  cloud_network_config = <<-EOF
-      version: 1
-      config:
-      - type: physical
-        name: enX0
-        subnets:
-          - type: static
-            address: 10.0.20.5/24
-            gateway: 10.0.20.1/24
-  EOF	
-
-  # -----------------------------------------------------------------------
-  # DISQUE
-  # -----------------------------------------------------------------------
-
-  disk {
-    name_label = "VM-KeyCloak-disk"
-    sr_id      = data.xenorchestra_sr.sr_local.id
-    size       = 10 * 1024 * 1024 * 1024
-  }
-  
-}
-
-resource "xenorchestra_vm" "vm_mail" {
-
-  name_label = "VM-Mail"
-
-  name_description = "VM Mail créée avec Terraform"
-
-  template = data.xenorchestra_template.debian.id
-
-  cpus       = 1
-  memory_max = 1073741824 # 1 Go
-  hvm_boot_firmware = "bios"
-
-  # -----------------------------------------------------------------------
-  # RÉSEAU & CLOUD-INIT
-  # -----------------------------------------------------------------------
-
-  network {
-      network_id  = data.xenorchestra_network.vnet_dmz.id
-  }
-
-  cloud_config = <<-EOF
-      #cloud-config
-
-      hostname: VM-Mail
-      manage_etc_hosts: true
-  EOF
-  # les configurations pour qu'il recoive les redirections du portail
-
-  cloud_network_config = <<-EOF
-      version: 1
-      config:
-      - type: physical
-        name: enX0
-        subnets:
-          - type: static
-            address: 10.0.50.3/24
-            gateway: 10.0.50.1/24
-  EOF	
-
-  # -----------------------------------------------------------------------
-  # DISQUE
-  # -----------------------------------------------------------------------
-
-  disk {
-    name_label = "VM-Mail-disk"
     sr_id      = data.xenorchestra_sr.sr_local.id
     size       = 10 * 1024 * 1024 * 1024
   }
@@ -489,19 +595,18 @@ resource "xenorchestra_vm" "vm_mail" {
 output "dns_id" {
     value = xenorchestra_vm.vm_dns.id
 }
-
-output "dhcp_id" {
-    value = xenorchestra_vm.vm_dhcp.id
+output "dns2_id" {
+    value = xenorchestra_vm.vm_dns3.id
 }
-
+output "dns3_id" {
+    value = xenorchestra_vm.vm_dns3.id
+}
+output "dhcp1_id" {
+    value = xenorchestra_vm.vm_dhcp1.id
+}
+output "dhcp2_id" {
+    value = xenorchestra_vm.vm_dhcp2.id
+}
 output "netbox_id" {
     value = xenorchestra_vm.vm_netbox.id
-}
-
-output "keycloak_id" {
-    value = xenorchestra_vm.vm_keycloak.id
-}
-
-output "mail_id" {
-    value = xenorchestra_vm.vm_mail.id
 }

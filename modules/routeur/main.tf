@@ -56,8 +56,10 @@ data "xenorchestra_network" "networks_xen" {
 # =========================================================================
 
 resource "xenorchestra_vm" "vm_routeur" {
-  name_label       = "Pfsense"
-  name_description = "VM Pfsense Routeur créée avec Terraform"
+  for_each = var.hosts
+  name_label       = "Pfsense-${index(var.hosts, each.value)}"
+  name_description = "VM RouteurPfsense créée avec Terraform"
+  host = each.value
 
   template          = data.xenorchestra_template.debian.id
   cpus              = 2
@@ -71,18 +73,16 @@ resource "xenorchestra_vm" "vm_routeur" {
     expected_ip_cidr = local.pool_network.ip
   }
 
-  # --- VIFs VNETs ---
   dynamic "network" {
     for_each = var.vnets
     content {
-      network_id  = data.xenorchestra_network.networks_xen[network.key].id
-      mac_address = network.value.mac
+      network_id  = var.network_ids[each.value.index]
+      mac_address = each.value.mac
     }
   }
 
-  # --- DISQUE ---
   disk {
-    name_label = "PfSense-disk"
+    name_label = "PfSense-${index(var.hosts, each.value)}-disk"
     sr_id      = data.xenorchestra_sr.sr_local.id
     size       = 20 * 1024 * 1024 * 1024
   }
@@ -102,11 +102,11 @@ resource "terraform_data" "ansible_provisioning" {
   provisioner "local-exec" {
     command = <<-EOT
       echo "[pfsense]" > inventory.ini
-      echo "${local.wan_ip} ansible_user=admin ansible_ssh_pass=admin ansible_ssh_common_args='-o StrictHostKeyChecking=no'" >> inventory.ini
+      echo "ansible_host=${local.wan_ip} ansible_user=admin ansible_ssh_pass=admin ansible_ssh_common_args='-o StrictHostKeyChecking=no'" >> inventory.ini
 
       ansible-playbook -i inventory.ini playbook.yml \
         --extra-vars 'vnet_configs_json=${jsonencode(var.vnets)}' \
-        --extra-vars 'dhcp_server_ip=10.0.20.3'
+        --extra-vars 'dhcp_server_ip=10.0.10.12,10.0.10.13'
     EOT
 
     working_dir = "${path.module}/ansible"

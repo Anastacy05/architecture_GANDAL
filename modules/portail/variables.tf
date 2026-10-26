@@ -1,1 +1,0 @@
-variable pool { type = string }
