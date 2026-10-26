@@ -214,4 +214,6 @@ module services {
   network_id = module.vnets.ids["services"]
   dhcp_vnets = local.dhcp_vnets
   all_vnets = local.all_vnets
+  gateway_number = 10
+  gateways_cidr = local.all_vnets["services"].ip
 }

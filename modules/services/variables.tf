@@ -31,3 +31,7 @@ variable all_vnets {
         role = string
     }))
 } 
+
+variable gateway_number { type = number }
+
+variable gateways_cidr { type = string }

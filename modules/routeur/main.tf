@@ -43,7 +43,7 @@ locals {
         net    = v.ip
         allow_to = [for d in var.allowed_links[k] : var.vnets[d].ip]
         dns  = k != "services"
-        dhcp = contains(var.var.dhcp_vnets_keys, k)
+        dhcp = contains(var.dhcp_vnets_keys, k)
       }
     ]
   }

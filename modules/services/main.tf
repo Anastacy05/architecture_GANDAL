@@ -42,6 +42,11 @@ locals {
 
   bind_allowed_cidrs = [for v in values(var.all_vnets) : v.ip]
   bind_allowed_str   = join("; ", concat(local.bind_allowed_cidrs, ["localhost"]))
+
+  gateways = [for k in range(1, var.gateway_number+1): cidrhost(var.gateways_cidr, k)]
+  gateways_b64  = base64encode("${join("\n", local.gateways)}\n")
+
+  script_b64    = base64encode(file("${path.module}/failover.sh"))
 }
 
 
@@ -116,10 +121,40 @@ resource "xenorchestra_vm" "vm_dns" {
             dhcp-1   IN      A       10.0.10.12
             dhcp-2   IN      A       10.0.10.13
             netbox   IN      A       10.0.10.11
+        - path: /etc/failover/node-id
+          permissions: '0644'
+          content: |
+            ${0 % length(var.hosts)}
+        - path: /etc/failover/gateways-list
+          encoding: b64
+          permissions: '0644'
+          content: ${local.gateways_b64}
+        - path: /usr/local/bin/failover.sh
+          encoding: b64
+          permissions: '0755'
+          content: ${local.script_b64}
+        - path: /etc/systemd/system/failover.service
+          permissions: '0644'
+          content: |
+            [Unit]
+            Description=Bascule de passerelle par defaut (VM cliente)
+            Wants=network-online.target
+            After=network-online.target
+            ConditionPathExists=/etc/failover/gateways-list
+            ConditionPathExists=/etc/failover/node-id
+            [Service]
+            Environment=IFACE=enX0
+            ExecStart=/usr/local/bin/failover.sh
+            Restart=always
+            RestartSec=5
+            [Install]
+            WantedBy=multi-user.target
 
       runcmd:
         - systemctl restart bind9
         - systemctl enable bind9
+        - systemctl daemon-reload
+        - systemctl enable --now failover.service
   EOF
 
   cloud_network_config = <<-EOF
@@ -183,10 +218,40 @@ resource "xenorchestra_vm" "vm_dns2" {
                 masters { 10.0.10.14; }
                 file "/etc/bind/db.gandal.internal";
             };
+        - path: /etc/failover/node-id
+          permissions: '0644'
+          content: |
+            ${1 % length(var.hosts)}
+        - path: /etc/failover/gateways-list
+          encoding: b64
+          permissions: '0644'
+          content: ${local.gateways_b64}
+        - path: /usr/local/bin/failover.sh
+          encoding: b64
+          permissions: '0755'
+          content: ${local.script_b64}
+        - path: /etc/systemd/system/failover.service
+          permissions: '0644'
+          content: |
+            [Unit]
+            Description=Bascule de passerelle par defaut (VM cliente)
+            Wants=network-online.target
+            After=network-online.target
+            ConditionPathExists=/etc/failover/gateways-list
+            ConditionPathExists=/etc/failover/node-id
+            [Service]
+            Environment=IFACE=enX0
+            ExecStart=/usr/local/bin/failover.sh
+            Restart=always
+            RestartSec=5
+            [Install]
+            WantedBy=multi-user.target
 
       runcmd:
         - systemctl restart bind9
         - systemctl enable bind9
+        - systemctl daemon-reload
+        - systemctl enable --now failover.service
   EOF
 
   cloud_network_config = <<-EOF
@@ -249,10 +314,40 @@ resource "xenorchestra_vm" "vm_dns3" {
                 masters { 10.0.10.14; }
                 file "/etc/bind/db.gandal.internal";
             };
+        - path: /etc/failover/node-id
+          permissions: '0644'
+          content: |
+            ${2 % length(var.hosts)}
+        - path: /etc/failover/gateways-list
+          encoding: b64
+          permissions: '0644'
+          content: ${local.gateways_b64}
+        - path: /usr/local/bin/failover.sh
+          encoding: b64
+          permissions: '0755'
+          content: ${local.script_b64}
+        - path: /etc/systemd/system/failover.service
+          permissions: '0644'
+          content: |
+            [Unit]
+            Description=Bascule de passerelle par defaut (VM cliente)
+            Wants=network-online.target
+            After=network-online.target
+            ConditionPathExists=/etc/failover/gateways-list
+            ConditionPathExists=/etc/failover/node-id
+            [Service]
+            Environment=IFACE=enX0
+            ExecStart=/usr/local/bin/failover.sh
+            Restart=always
+            RestartSec=5
+            [Install]
+            WantedBy=multi-user.target
 
       runcmd:
         - systemctl restart bind9
         - systemctl enable bind9
+        - systemctl daemon-reload
+        - systemctl enable --now failover.service
   EOF
 
   cloud_network_config = <<-EOF
@@ -353,10 +448,40 @@ resource "xenorchestra_vm" "vm_dhcp1" {
                 }
               ]
             }
+        - path: /etc/failover/node-id
+          permissions: '0644'
+          content: |
+            ${3 % length(var.hosts)}
+        - path: /etc/failover/gateways-list
+          encoding: b64
+          permissions: '0644'
+          content: ${local.gateways_b64}
+        - path: /usr/local/bin/failover.sh
+          encoding: b64
+          permissions: '0755'
+          content: ${local.script_b64}
+        - path: /etc/systemd/system/failover.service
+          permissions: '0644'
+          content: |
+            [Unit]
+            Description=Bascule de passerelle par defaut (VM cliente)
+            Wants=network-online.target
+            After=network-online.target
+            ConditionPathExists=/etc/failover/gateways-list
+            ConditionPathExists=/etc/failover/node-id
+            [Service]
+            Environment=IFACE=enX0
+            ExecStart=/usr/local/bin/failover.sh
+            Restart=always
+            RestartSec=5
+            [Install]
+            WantedBy=multi-user.target
 
       runcmd:
         - systemctl restart kea-dhcp4-server
         - systemctl enable kea-dhcp4-server
+        - systemctl daemon-reload
+        - systemctl enable --now failover.service
   EOF
 
   cloud_network_config = <<-EOF
@@ -448,10 +573,40 @@ resource "xenorchestra_vm" "vm_dhcp2" {
                 }
               ]
             }
+        - path: /etc/failover/node-id
+          permissions: '0644'
+          content: |
+            ${4 % length(var.hosts)}
+        - path: /etc/failover/gateways-list
+          encoding: b64
+          permissions: '0644'
+          content: ${local.gateways_b64}
+        - path: /usr/local/bin/failover.sh
+          encoding: b64
+          permissions: '0755'
+          content: ${local.script_b64}
+        - path: /etc/systemd/system/failover.service
+          permissions: '0644'
+          content: |
+            [Unit]
+            Description=Bascule de passerelle par defaut (VM cliente)
+            Wants=network-online.target
+            After=network-online.target
+            ConditionPathExists=/etc/failover/gateways-list
+            ConditionPathExists=/etc/failover/node-id
+            [Service]
+            Environment=IFACE=enX0
+            ExecStart=/usr/local/bin/failover.sh
+            Restart=always
+            RestartSec=5
+            [Install]
+            WantedBy=multi-user.target
 
       runcmd:
         - systemctl restart kea-dhcp4-server
         - systemctl enable kea-dhcp4-server
+        - systemctl daemon-reload
+        - systemctl enable --now failover.service
   EOF
 
   cloud_network_config = <<-EOF
