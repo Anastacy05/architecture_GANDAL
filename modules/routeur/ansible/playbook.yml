@@ -9,6 +9,7 @@
     # Terraform via des variables d'environnement
     vnet_configs: "{{ lookup('env', 'VNET_CONFIGS_JSON') | from_json }}"
     dhcp_server_ip: "{{ lookup('env', 'DHCP_SERVER_IP') }}"
+    dns_servers: "{{ lookup('env', 'DNS_SERVERS') }}"
 
   tasks:
     # --- PHASE 0 : attendre que pfSense soit joignable (via le bastion) ---
@@ -67,3 +68,97 @@
         pfSsh.php playback /tmp/enable_dhcp_relay.php
       register: relay_result
       changed_when: true
+
+    # --- PHASE 5 : Règles de pare-feu ---
+    # pfSense filtre à l'ENTRÉE de chaque interface et bloque par défaut :
+    # on n'ajoute donc que des règles "pass", une par flux autorisé
+    # (matrice définie dans le main.tf racine, local.allowed_links).
+    - name: Autoriser TCP du vnet gateway vers le routeur (Ansible + toute communication venant de l'exterieur)
+      pfsensible.core.pfsense_rule:
+        name: "allow gateway tcp to routeur {{ item.name }}"
+        action: pass
+        interface: "{{ item.name }}"
+        ipprotocol: inet
+        protocol: tcp
+        source: "{{ item.net }}"
+        destination: "{{ item.ip }}"
+        state: present
+      loop: "{{ vnet_configs | selectattr('role', 'equalto', 'gateway') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    # Les VM clientes testent leurs routeurs par ping pour basculer de passerelle :
+    # sans cette règle, pfSense bloque le ping vers sa propre IP et tous les
+    # routeurs paraissent morts.
+    - name: Autoriser le ping vers le routeur depuis tous les vnets pour les scripts de bascule
+      pfsensible.core.pfsense_rule:
+        name: "allow ping routeur {{ item.name }}"
+        action: pass
+        interface: "{{ item.name }}"
+        ipprotocol: inet
+        protocol: icmp
+        source: "{{ item.net }}"
+        destination: "{{ item.ip }}"
+        state: present
+      loop: "{{ vnet_configs | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    # Alias : une seule règle par interface pour tous les DNS / tous les DHCP
+    - name: Alias des serveurs DNS
+      pfsensible.core.pfsense_alias:
+        name: DNS_SERVERS
+        type: host
+        address: "{{ dns_servers }}"
+        descr: "3 DNS (master + slaves)"
+        state: present
+
+    - name: Alias des serveurs DHCP
+      pfsensible.core.pfsense_alias:
+        name: DHCP_SERVERS
+        type: host
+        address: "{{ dhcp_server_ip | replace(',', ' ') }}"
+        descr: "2 DHCP (HA)"
+        state: present
+
+    - name: Tous les vnets vers les DNS (port 53)
+      pfsensible.core.pfsense_rule:
+        name: "allow {{ item.name }} -> DNS"
+        action: pass
+        interface: "{{ item.name }}"
+        ipprotocol: inet
+        protocol: tcp/udp
+        source: "{{ item.net }}"
+        destination: "DNS_SERVERS:53"
+        state: present
+      loop: "{{ vnet_configs | selectattr('dns') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Vnets de dhcp_vnets vers les DHCP (renouvellement de bail, port 67)
+      pfsensible.core.pfsense_rule:
+        name: "allow {{ item.name }} -> DHCP"
+        action: pass
+        interface: "{{ item.name }}"
+        ipprotocol: inet
+        protocol: udp
+        source: "{{ item.net }}"
+        destination: "DHCP_SERVERS:67"
+        state: present
+      loop: "{{ vnet_configs | selectattr('dhcp') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Autoriser les flux inter-vnets de la matrice
+      pfsensible.core.pfsense_rule:
+        name: "allow {{ item.0.name }} -> {{ item.1 }}"
+        action: pass
+        interface: "{{ item.0.name }}"
+        ipprotocol: inet
+        protocol: any
+        source: "{{ item.0.net }}"
+        destination: "{{ item.1 }}"
+        state: present
+      loop: "{{ vnet_configs | subelements('allow_to') }}"
+      loop_control:
+        label: "{{ item.0.name }} -> {{ item.1 }}"

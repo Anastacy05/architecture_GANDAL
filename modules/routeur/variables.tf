@@ -29,4 +29,12 @@ variable "bastion_wan_ips" {
 variable "bastion_ssh_user" { type = string }
 variable "bastion_ssh_key" { type = string }
 
-variable "dhcp_server_ips" { type    = list(string) }
+variable "allowed_links" {
+  type = map(list(string))
+}
+
+variable "dhcp_server_ips" { type = list(string) }
+
+variable "dns_server_ips" { type = list(string) }
+
+variable "dhcp_vnets_keys" { type = list(string) }

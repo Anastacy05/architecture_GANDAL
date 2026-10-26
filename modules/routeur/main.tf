@@ -40,6 +40,10 @@ locals {
         mac    = var.router_macs[n][k]
         ip     = cidrhost(v.ip, tonumber(n) + 1)
         prefix = v.prefix
+        net    = v.ip
+        allow_to = [for d in var.allowed_links[k] : var.vnets[d].ip]
+        dns  = k != "services"
+        dhcp = contains(var.var.dhcp_vnets_keys, k)
       }
     ]
   }
@@ -98,10 +102,11 @@ resource "terraform_data" "ansible_provisioning" {
     vm      = xenorchestra_vm.vm_routeur[each.key].id
     configs = sha1(jsonencode(local.router_configs[each.key]))
     dhcp    = join(",", var.dhcp_server_ips)
+    dns     = join(",", var.dns_server_ips)
   }
 
   provisioner "local-exec" {
-    # Un inventaire par noeud : les 3 runs tournent en parallele dans le même dossier
+    # Un inventaire par noeud : les 3 runs tournent en parallele dans le meme dossier
     command = <<-EOT
       printf '[pfsense]\nrouter ansible_host=%s ansible_user=admin ansible_ssh_pass=admin ansible_ssh_common_args=%s\n' \
         "$ROUTER_IP" "'$SSH_ARGS'" > inventory-${each.key}.ini
@@ -114,6 +119,7 @@ resource "terraform_data" "ansible_provisioning" {
       ROUTER_IP         = local.gateway_ips[each.key]
       VNET_CONFIGS_JSON = jsonencode(local.router_configs[each.key])
       DHCP_SERVER_IP    = join(",", var.dhcp_server_ips)
+      DNS_SERVERS       = join(",", var.dns_server_ips)
       SSH_ARGS = join(" ", [
         "-o StrictHostKeyChecking=no",
         "-o UserKnownHostsFile=/dev/null",

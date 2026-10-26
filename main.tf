@@ -122,6 +122,11 @@ locals {
 
   all_vnets = merge(local.vnets, local.tenants)
 
+  dhcp_vnets = {
+    for k, v in local.all_vnets : k => v
+    if startswith(v.role, "tenant") || v.role == "vpn" || v.role == "stockage" || v.role == "backend"
+  }
+
   # MAC unique de chaque routeur sur chaque vnet : on remplace le 5e octet de la
   # MAC du vnet par le numero de noeud (sinon 3 routeurs auraient la meme MAC
   # sur le meme vnet).
@@ -133,6 +138,21 @@ locals {
         slice(split(":", v.mac), 5, 6)
       ))
     }
+  }
+
+  isolated_keys = ["management", "observation", "stockage", "backend"]
+
+  # toutes les communications autorisees sans restriction de port (sans compter le dns et le dhcp car ils dependent du port)
+  links = concat(
+    [for k in keys(local.all_vnets) : { from = k, to = "gateway" } if k != "gateway"],
+    [for k in keys(local.all_vnets) : { from = "gateway", to = k } if k != "gateway"],
+    [for t in keys(local.tenants) : { from = t, to = "vpn" }],
+    [for t in keys(local.tenants) : { from = "vpn", to = t }],
+  )
+
+  # pour chaque vnet : vnets joignables sans restriction de port
+  allowed_links = {
+    for k in keys(local.all_vnets) : k => distinct([for l in local.links : l.to if l.from == k])
   }
 
   # Acces SSH de la machine qui lance Terraform vers les bastions (rebond)
@@ -181,7 +201,10 @@ module routeur {
   bastion_wan_ips = module.bastion.wan_ips
   bastion_ssh_user = local.bastion_ssh_user
   bastion_ssh_key = local.bastion_ssh_key
+  allowed_links = local.allowed_links
   dhcp_server_ips = local.dhcp_ips
+  dns_server_ips = local.dns_ips
+  dhcp_vnets_keys = keys(local.dhcp_vnets)
 }
 
 module services {
@@ -189,9 +212,6 @@ module services {
   pool = data.xenorchestra_pool.pool.id
   hosts = local.hosts_ids
   network_id = module.vnets.ids["services"]
-  dhcp_vnets = {
-    for k, v in local.all_vnets : k => v
-    if startswith(v.role, "tenant") || v.role == "vpn" || v.role == "stockage" || v.role == "backend"
-  }
+  dhcp_vnets = local.dhcp_vnets
   all_vnets = local.all_vnets
 }
