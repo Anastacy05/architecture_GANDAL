@@ -22,42 +22,42 @@ data "xenorchestra_sr" "sr_local" {
 }
 
 # =========================================================================
-# RESEAUX
+# LOCALS
 # =========================================================================
 
 locals {
-  pool_network = {
-    ip     = "192.168.122.0/24"
-    name   = "Pool-wide network 0"
-    mac    = "02:00:00:00:01:01"
-    ip_y   = "192.168.122.10"
-    prefix = "24"
-    role   = "wan"
+  nodes = { for i, h in var.hosts : tostring(i) => h }
+
+  # Tous les vnets sauf gateway (celui-ci est declaré en premier, à parti)
+  other_vnets = { for k, v in var.vnets : k => v if k != "gateway" }
+
+  # Config de chaque routeur, passee a Ansible : IP = .(noeud+1) sur CHAQUE vnet
+  router_configs = {
+    for n, _ in local.nodes : n => [
+      for k, v in var.vnets : {
+        name   = v.name
+        role   = v.role
+        mac    = var.router_macs[n][k]
+        ip     = cidrhost(v.ip, tonumber(n) + 1)
+        prefix = v.prefix
+      }
+    ]
   }
 
-  # IP WAN récupérée après que expected_ip_cidr ait attendu
-  wan_ip = [
-    for ip in xenorchestra_vm.vm_routeur.ipv4_addresses :
-    ip if startswith(ip, "192.168.122.")
-  ][0]
+  # IP du routeur sur le vnet gateway : c'est par la que Ansible le joint
+  gateway_ips = {
+    for n, _ in local.nodes : n => cidrhost(var.vnets["gateway"].ip, tonumber(n) + 1)
+  }
 }
 
-data "xenorchestra_network" "network_xen" {
-  name_label = local.pool_network.name
-}
-
-data "xenorchestra_network" "networks_xen" {
-  for_each   = var.vnets
-  name_label = each.value.name
-}
 
 # =========================================================================
 # VM ROUTEUR
 # =========================================================================
 
 resource "xenorchestra_vm" "vm_routeur" {
-  for_each = var.hosts
-  name_label       = "Pfsense-${index(var.hosts, each.value)}"
+  for_each = local.nodes
+  name_label       = "Pfsense-${each.key}"
   name_description = "VM RouteurPfsense créée avec Terraform"
   host = each.value
 
@@ -66,23 +66,21 @@ resource "xenorchestra_vm" "vm_routeur" {
   memory_max        = 1073741824
   hvm_boot_firmware = "bios"
 
-  # --- VIF WAN (obligatoire : expected_ip_cidr) ---
   network {
-    network_id       = data.xenorchestra_network.network_xen.id
-    mac_address      = local.pool_network.mac
-    expected_ip_cidr = local.pool_network.ip
+    network_id  = var.network_ids["gateway"]
+    mac_address = var.router_macs[each.key]["gateway"]
   }
-
   dynamic "network" {
-    for_each = var.vnets
+    for_each = local.other_vnets
+    iterator = vn
     content {
-      network_id  = var.network_ids[each.value.index]
-      mac_address = each.value.mac
+      network_id  = var.network_ids[vn.key]
+      mac_address = var.router_macs[each.key][vn.key]
     }
   }
 
   disk {
-    name_label = "PfSense-${index(var.hosts, each.value)}-disk"
+    name_label = "PfSense-${each.key}-disk"
     sr_id      = data.xenorchestra_sr.sr_local.id
     size       = 20 * 1024 * 1024 * 1024
   }
@@ -93,23 +91,35 @@ resource "xenorchestra_vm" "vm_routeur" {
 # =========================================================================
 
 resource "terraform_data" "ansible_provisioning" {
+  for_each   = local.nodes
   depends_on = [xenorchestra_vm.vm_routeur]
 
   triggers_replace = {
-    vm_ip = local.wan_ip
+    vm      = xenorchestra_vm.vm_routeur[each.key].id
+    configs = sha1(jsonencode(local.router_configs[each.key]))
+    dhcp    = join(",", var.dhcp_server_ips)
   }
 
   provisioner "local-exec" {
+    # Un inventaire par noeud : les 3 runs tournent en parallele dans le même dossier
     command = <<-EOT
-      echo "[pfsense]" > inventory.ini
-      echo "ansible_host=${local.wan_ip} ansible_user=admin ansible_ssh_pass=admin ansible_ssh_common_args='-o StrictHostKeyChecking=no'" >> inventory.ini
-
-      ansible-playbook -i inventory.ini playbook.yml \
-        --extra-vars 'vnet_configs_json=${jsonencode(var.vnets)}' \
-        --extra-vars 'dhcp_server_ip=10.0.10.12,10.0.10.13'
+      printf '[pfsense]\nrouter ansible_host=%s ansible_user=admin ansible_ssh_pass=admin ansible_ssh_common_args=%s\n' \
+        "$ROUTER_IP" "'$SSH_ARGS'" > inventory-${each.key}.ini
+      ansible-playbook -i inventory-${each.key}.ini playbook.yml
     EOT
 
     working_dir = "${path.module}/ansible"
+
+    environment = {
+      ROUTER_IP         = local.gateway_ips[each.key]
+      VNET_CONFIGS_JSON = jsonencode(local.router_configs[each.key])
+      DHCP_SERVER_IP    = join(",", var.dhcp_server_ips)
+      SSH_ARGS = join(" ", [
+        "-o StrictHostKeyChecking=no",
+        "-o UserKnownHostsFile=/dev/null",
+        "-o ProxyCommand=\"ssh -W %h:%p -q -i ${var.bastion_ssh_key} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${var.bastion_ssh_user}@${var.bastion_wan_ips[each.key]}\"",
+      ])
+    }
   }
 }
 
@@ -117,10 +127,10 @@ resource "terraform_data" "ansible_provisioning" {
 # SORTIES
 # =========================================================================
 
-output "id" {
-  value = xenorchestra_vm.vm_routeur.id
+output "ids" {
+  value = { for k, vm in xenorchestra_vm.vm_routeur : k => vm.id }
 }
 
-output "wan_ip" {
-  value = local.wan_ip
+output "gateway_ips" {
+  value = local.gateway_ips
 }

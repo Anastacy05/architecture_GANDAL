@@ -7,9 +7,10 @@ global $config;
 // Active le service relay
 $config['dhcrelay']['enable'] = true;
 
-// Downstream : toutes les interfaces sauf celle du VNET services
+// Downstream : toutes les interfaces sauf services (serveurs DHCP) et gateway
+// (le DHCP du vnet gateway est assuré par les bastions, pour les routeurs eux-mêmes au premier démarrage)
 $config['dhcrelay']['interface'] = [
-{% for item in vnet_configs if item.role != 'services' %}
+{% for item in vnet_configs if item.role not in ['services', 'gateway'] %}
     '{{ mac_to_interface[item.mac | replace(':', '') | lower] }}',
 {% endfor %}
 ];

@@ -32,7 +32,7 @@ locals {
         pool = "${cidrhost(var.dhcp_vnets[key].ip, 11)} - ${cidrhost(var.dhcp_vnets[key].ip, 254)}"
       }]
       option-data = [
-        { name = "routers", data = var.var.dhcp_vnets[key].ip_emi },
+        { name = "routers", data = var.dhcp_vnets[key].ip_emi },
         { name = "domain-name-servers", data = "10.0.10.14, 10.0.10.15, 10.0.10.16" },
         { name = "domain-name", data = "gandal.internal", always-send = true }
       ]

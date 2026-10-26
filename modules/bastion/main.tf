@@ -40,6 +40,19 @@ locals {
 
   script_b64    = base64encode(file("${path.module}/failover.sh"))
 
+  dnsmasq_conf = join("\n", concat([
+    "# genere par Terraform",
+    "port=0",
+    "interface=enX1",
+    "bind-interfaces",
+    "dhcp-range=${cidrhost(var.gateways_cidr, 0)},static,${cidrnetmask(var.gateways_cidr)}",
+    "dhcp-option=3",
+  ], [
+    for n, mac in var.router_gateway_macs :
+    "dhcp-host=${mac},${cidrhost(var.gateways_cidr, tonumber(n) + 1)}"
+  ]))
+  dnsmasq_b64   = base64encode("${local.dnsmasq_conf}\n")
+
 }
 
 # =========================================================================
@@ -71,6 +84,11 @@ resource "xenorchestra_vm" "vm_bastion" {
       hostname: VM-Portail-${each.key}
       manage_etc_hosts: true
 
+      package_update: true
+      packages:
+        - dnsmasq
+        - iputils-ping
+
       write-files:
         - path: /etc/failover/node-id
           permissions: '0644'
@@ -100,10 +118,16 @@ resource "xenorchestra_vm" "vm_bastion" {
             RestartSec=5
             [Install]
             WantedBy=multi-user.target
+        - path: /etc/dnsmasq.d/gateway.conf
+          encoding: b64
+          permissions: '0644'
+          content: ${local.dnsmasq_b64}
 
       runcmd:
         - systemctl daemon-reload
         - systemctl enable --now failover.service
+        - systemctl enable dnsmasq
+        - systemctl restart dnsmasq
   EOF
 
   cloud_network_config = <<EOF

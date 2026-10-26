@@ -35,15 +35,18 @@ data "xenorchestra_pool" "pool" {
 
 locals {
 
-  hosts_name = [ emilia, ram, rem ]
+  hosts_name = [ "emilia", "ram", "rem" ]
+
+  dns_ips = ["10.0.0.14", "10.0.0.15", "10.0.0.16"]
+  dhcp_ips = ["10.0.0.12", "10.0.0.13"]
   vnets = {
     gateway = {
       ip     = "10.0.0.0/24"
-      name   = "Vnet-Services"
+      name   = "Vnet-Gateway"
       mac    = "02:00:00:00:00:00"
       ip_emi = "10.0.0.1"
       prefix = "24"
-      role   = "services"
+      role   = "gateway"
     }
     services = {
       ip     = "10.0.10.0/24"
@@ -118,10 +121,27 @@ locals {
   }
 
   all_vnets = merge(local.vnets, local.tenants)
+
+  # MAC unique de chaque routeur sur chaque vnet : on remplace le 5e octet de la
+  # MAC du vnet par le numero de noeud (sinon 3 routeurs auraient la meme MAC
+  # sur le meme vnet).
+  router_macs = {
+    for n in range(length(local.hosts_name)) : tostring(n) => {
+      for k, v in local.all_vnets : k => join(":", concat(
+        slice(split(":", v.mac), 0, 4),
+        [format("%02x", n)],
+        slice(split(":", v.mac), 5, 6)
+      ))
+    }
+  }
+
+  # Acces SSH de la machine qui lance Terraform vers les bastions (rebond)
+  bastion_ssh_user = "debian"                    # A ADAPTER : utilisateur du template Debian
+  bastion_ssh_key  = pathexpand("~/.ssh/id_ed25519") # A ADAPTER : cle autorisee sur les bastions
 }
 
 data "xenorchestra_host" "hosts" {
-  for_each = local.hosts_name
+  for_each = toset(local.hosts_name)
   name_label = each.value
 }
 
@@ -148,6 +168,7 @@ module bastion {
   gateway_number = 10
   gateways_cidr = local.all_vnets["gateway"].ip
   internal_cidr = "10.0.0.0/16"
+  router_gateway_macs = { for n, m in local.router_macs : n => m["gateway"] }
 }
 
 module routeur {
@@ -156,6 +177,11 @@ module routeur {
   hosts = local.hosts_ids
   network_ids = module.vnets.ids
   vnets = local.all_vnets
+  router_macs = local.router_macs
+  bastion_wan_ips = module.bastion.wan_ips
+  bastion_ssh_user = local.bastion_ssh_user
+  bastion_ssh_key = local.bastion_ssh_key
+  dhcp_server_ips = local.dhcp_ips
 }
 
 module services {

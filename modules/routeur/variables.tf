@@ -5,7 +5,7 @@ variable hosts {
 }
 
 variable network_ids {
-    type = list(string)
+    type = map(string)
 }
 variable vnets {
     type = map(object({
@@ -17,3 +17,16 @@ variable vnets {
         role = string
     }))
 } 
+
+variable "router_macs" {
+  type = map(map(string))
+}
+
+variable "bastion_wan_ips" {
+  type = map(string)
+}
+
+variable "bastion_ssh_user" { type = string }
+variable "bastion_ssh_key" { type = string }
+
+variable "dhcp_server_ips" { type    = list(string) }

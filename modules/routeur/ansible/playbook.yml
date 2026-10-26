@@ -5,10 +5,19 @@
 
   vars:
     ansible_python_interpreter: /usr/local/bin/python3.11
-    # Reconstruit la liste depuis le JSON passé par Terraform
-    vnet_configs: "{{ vnet_configs_json | from_json }}"
+    # Liste des pattes de CE routeur (name, role, mac, ip, prefix), passée par
+    # Terraform via des variables d'environnement
+    vnet_configs: "{{ lookup('env', 'VNET_CONFIGS_JSON') | from_json }}"
+    dhcp_server_ip: "{{ lookup('env', 'DHCP_SERVER_IP') }}"
 
   tasks:
+    # --- PHASE 0 : attendre que pfSense soit joignable (via le bastion) ---
+    # Au 1er démarrage, il obtient son IP du DHCP du bastion : ça prend un moment
+    - name: Attendre la connexion SSH
+      ansible.builtin.wait_for_connection:
+        delay: 10
+        timeout: 900
+
     # --- PHASE 1 : Découverte des interfaces ---
     - name: Découvrir interfaces et MAC
       ansible.builtin.shell: |
@@ -42,7 +51,7 @@
         descr: "{{ item.name }}"
         enable: true
         ipv4_type: static
-        ipv4_address: "{{ item.ip_y }}"
+        ipv4_address: "{{ item.ip }}"
         ipv4_prefixlen: "{{ item.prefix }}"
       loop: "{{ vnet_configs }}"
 
