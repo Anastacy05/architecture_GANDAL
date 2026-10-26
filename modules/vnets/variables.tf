@@ -5,3 +5,8 @@ variable vnets {
         name = string
     }))
 } 
+
+variable "pif_ids" {
+  description = "PIF sur laquelle passent les tunnels (physique, VLAN ou bond, avec une IP). Une par pool."
+  type        = list(string)
+}

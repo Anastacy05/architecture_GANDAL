@@ -178,6 +178,7 @@ module vnets {
   source = "./modules/vnets"
   pool = data.xenorchestra_pool.pool.id
   vnets = { for k,v in local.all_vnets : k => { name = v.name } }
+  pif_ids = [ "eth0" ]
 }
 
 module bastion {
