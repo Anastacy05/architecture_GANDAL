@@ -35,10 +35,10 @@ data "xenorchestra_pool" "pool" {
 
 locals {
 
-  hosts_name = [ "emilia", "ram", "rem" ]
+  hosts_name = [ "emilia", "jade", "rem" ]
 
-  dns_ips = ["10.0.0.14", "10.0.0.15", "10.0.0.16"]
-  dhcp_ips = ["10.0.0.12", "10.0.0.13"]
+  dns_ips = ["10.0.0.13", "10.0.0.14", "10.0.0.15"]
+  dhcp_ips = ["10.0.0.11", "10.0.0.12"]
   vnets = {
     gateway = {
       ip     = "10.0.0.0/24"
@@ -96,13 +96,13 @@ locals {
       prefix = "24"
       role   = "stockage"
     }
-    backend = {
+    devops = {
       ip     = "10.0.70.0/24"
-      name   = "Vnet-Backend"
+      name   = "Vnet-DevOps"
       mac    = "02:00:00:00:00:07"
       ip_emi = "10.0.70.1"
       prefix = "24"
-      role   = "backend"
+      role   = "devops"
     }
     
   }
@@ -124,7 +124,7 @@ locals {
 
   dhcp_vnets = {
     for k, v in local.all_vnets : k => v
-    if startswith(v.role, "tenant") || v.role == "vpn" || v.role == "stockage" || v.role == "backend"
+    if startswith(v.role, "tenant") || v.role == "vpn" || v.role == "stockage" || v.role == "devops" || v.role == "observation" || v.role == "management"
   }
 
   # MAC unique de chaque routeur sur chaque vnet : on remplace le 5e octet de la
@@ -140,14 +140,13 @@ locals {
     }
   }
 
-  isolated_keys = ["management", "observation", "stockage", "backend"]
-
   # toutes les communications autorisees sans restriction de port (sans compter le dns et le dhcp car ils dependent du port)
   links = concat(
     [for k in keys(local.all_vnets) : { from = k, to = "gateway" } if k != "gateway"],
     [for k in keys(local.all_vnets) : { from = "gateway", to = k } if k != "gateway"],
     [for t in keys(local.tenants) : { from = t, to = "vpn" }],
     [for t in keys(local.tenants) : { from = "vpn", to = t }],
+    [{ from = "stockage", to = "devops" }, { from = "devops", to = "stockage"}],
   )
 
   # pour chaque vnet : vnets joignables sans restriction de port

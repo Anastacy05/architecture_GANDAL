@@ -33,7 +33,7 @@ locals {
       }]
       option-data = [
         { name = "routers", data = var.dhcp_vnets[key].ip_emi },
-        { name = "domain-name-servers", data = "10.0.10.14, 10.0.10.15, 10.0.10.16" },
+        { name = "domain-name-servers", data = "10.0.10.13, 10.0.10.14, 10.0.10.15" },
         { name = "domain-name", data = "gandal.internal", always-send = true }
       ]
       user-context = { description = var.dhcp_vnets[key].name }
@@ -164,7 +164,7 @@ resource "xenorchestra_vm" "vm_dns" {
         name: enX0
         subnets:
           - type: static
-            address: 10.0.10.14/24
+            address: 10.0.10.13/24
             gateway: 10.0.10.1
   EOF	
 
@@ -261,7 +261,7 @@ resource "xenorchestra_vm" "vm_dns2" {
         name: enX0
         subnets:
           - type: static
-            address: 10.0.10.15/24
+            address: 10.0.10.14/24
             gateway: 10.0.10.1
   EOF	
 
@@ -357,7 +357,7 @@ resource "xenorchestra_vm" "vm_dns3" {
         name: enX0
         subnets:
           - type: static
-            address: 10.0.10.16/24
+            address: 10.0.10.15/24
             gateway: 10.0.10.1
   EOF	
 
@@ -491,7 +491,7 @@ resource "xenorchestra_vm" "vm_dhcp1" {
         name: enX0
         subnets:
           - type: static
-            address: 10.0.10.12/24
+            address: 10.0.10.11/24
             gateway: 10.0.10.1
   EOF	
   disk {
@@ -616,126 +616,11 @@ resource "xenorchestra_vm" "vm_dhcp2" {
         name: enX0
         subnets:
           - type: static
-            address: 10.0.10.13/24
+            address: 10.0.10.12/24
             gateway: 10.0.10.1
   EOF	
   disk {
     name_label = "VM-DHCP-2-disk"
-    sr_id      = data.xenorchestra_sr.sr_local.id
-    size       = 10 * 1024 * 1024 * 1024
-  }
-  
-}
-
-
-# =========================================================================
-# 1 VM POUR NETBOX
-# =========================================================================
-
-
-resource "xenorchestra_vm" "vm_netbox" {
-
-  name_label = "VM-NetBox"
-  name_description = "VM NetBox créée avec Terraform"
-  host = var.hosts[ 5 % length(var.hosts) ]
-
-  template = data.xenorchestra_template.debian.id
-  cpus       = 1
-  memory_max = 1073741824 # 1 Go
-  hvm_boot_firmware = "bios"
-  network {
-      network_id  = var.network_id
-  }
-
-  cloud_config = <<-EOF
-      #cloud-config
-
-      hostname: VM-NetBox
-      manage_etc_hosts: true
-
-      package_update: true
-      packages:
-        - postgresql
-        - redis-server
-        - nginx
-        - python3-pip
-        - python3-venv
-        - python3-dev
-        - build-essential
-        - libxml2-dev
-        - libxslt1-dev
-        - libffi-dev
-        - libssl-dev
-        - zlib1g-dev
-        - git
-        - curl
-
-      runcmd:
-        # PostgreSQL
-        - sudo -u postgres psql -c "CREATE DATABASE netbox;"
-        - sudo -u postgres psql -c "CREATE USER netbox WITH PASSWORD 'netbox_password_securise';"
-        - sudo -u postgres psql -c "ALTER DATABASE netbox OWNER TO netbox;"
-        - sudo -u postgres psql -c "GRANT CREATE ON SCHEMA public TO netbox;"
-
-        # Installation NetBox
-        - git clone -b v4.2.0 https://github.com/netbox-community/netbox.git /opt/netbox
-        - useradd --system --group netbox
-        - chown --recursive netbox /opt/netbox/netbox/media/
-
-        # Configuration de base
-        - |
-          cd /opt/netbox/netbox/netbox/
-          cp configuration_example.py configuration.py
-          # SECRET_KEY généré avec le python système (stdlib uniquement)
-          SECRET_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(50))")
-          sed -i "s|SECRET_KEY = ''|SECRET_KEY = '$SECRET_KEY'|" configuration.py
-          sed -i "s/ALLOWED_HOSTS = \[\]/ALLOWED_HOSTS = ['*']/" configuration.py
-          sed -i "s/PASSWORD': 'netbox'/PASSWORD': 'netbox_password_securise'/" configuration.py
-          echo "PLUGINS = ['netbox_kea']" >> configuration.py
-
-        # Dépendances et plugin
-        - echo "netbox-kea-ng" >> /opt/netbox/local_requirements.txt
-        - /opt/netbox/upgrade.sh
-        - chown -R netbox:netbox /opt/netbox
-
-        # Services
-
-        # Services
-        - systemctl start netbox
-        - systemctl enable netbox
-        - systemctl start netbox-rq
-        - systemctl enable netbox-rq
-
-        # Nginx
-        - |
-          cat > /etc/nginx/sites-available/netbox <<'CEOF'
-          server {
-              listen 80;
-              server_name _;
-              location / {
-                  proxy_pass http://127.0.0.1:8001;
-                  proxy_set_header Host $host;
-                  proxy_set_header X-Real-IP $remote_addr;
-              }
-          }
-          CEOF
-        - ln -sf /etc/nginx/sites-available/netbox /etc/nginx/sites-enabled/netbox
-        - rm -f /etc/nginx/sites-enabled/default
-        - systemctl restart nginx
-  EOF
-
-  cloud_network_config = <<-EOF
-      version: 1
-      config:
-      - type: physical
-        name: enX0
-        subnets:
-          - type: static
-            address: 10.0.10.11/24
-            gateway: 10.0.10.1
-  EOF	
-  disk {
-    name_label = "VM-NetBox-disk"
     sr_id      = data.xenorchestra_sr.sr_local.id
     size       = 10 * 1024 * 1024 * 1024
   }
@@ -761,7 +646,4 @@ output "dhcp1_id" {
 }
 output "dhcp2_id" {
     value = xenorchestra_vm.vm_dhcp2.id
-}
-output "netbox_id" {
-    value = xenorchestra_vm.vm_netbox.id
 }
