@@ -91,14 +91,14 @@ resource "xenorchestra_vm" "vm_alpine" {
     mac_address = local.transit_macs[each.key]
   }
   # enX1.. : les reseaux users de CE noeud (meme nombre pour toutes les alpines)
-  dynamic "network" {
-    for_each = local.node_tenants[each.key]
-    iterator = t
-    content {
-      network_id  = var.tenant_network_ids[t.value]
-      mac_address = local.tenant_macs[t.value]
-    }
-  }
+  #dynamic "network" {
+  #  for_each = local.node_tenants[each.key]
+  #  iterator = t
+  #  content {
+  #    network_id  = var.tenant_network_ids[t.value]
+  #    mac_address = local.tenant_macs[t.value]
+  #  }
+  #}
 
   cloud_config = <<-EOF
       #cloud-config
@@ -193,14 +193,14 @@ resource "xenorchestra_vm" "vm_alpine" {
         mac_address = local.transit_macs[each.key]
         subnets     = [{ type = "static", address = "${var.alpine_ips[each.key]}/${split("/", var.transit_cidr)[1]}" }]
       }],
-      [
-        for idx, t in local.node_tenants[each.key] : {
-          type        = "physical"
-          name        = "enX${idx + 1}"
-          mac_address = local.tenant_macs[t]
-          subnets     = [{ type = "static", address = "${var.tenants[t].ip_emi}/${var.tenants[t].prefix}" }]
-        }
-      ]
+      #[
+      #  for idx, t in local.node_tenants[each.key] : {
+      #    type        = "physical"
+      #    name        = "enX${idx + 1}"
+      #    mac_address = local.tenant_macs[t]
+      #    subnets     = [{ type = "static", address = "${var.tenants[t].ip_emi}/${var.tenants[t].prefix}" }]
+      #  }
+      #]
     )
   })
 

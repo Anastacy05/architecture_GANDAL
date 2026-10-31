@@ -78,7 +78,7 @@ locals {
 
   # Reseaux users : 1 alpine par hote, chacune route EXACTEMENT tenants_per_host reseaux
   # -> le total suit la taille de hosts_name (ajouter un hote = ajouter une alpine et ses reseaux)
-  tenants_per_host = 31
+  tenants_per_host = 30
   tenant_count     = local.tenants_per_host * length(local.hosts_name)
 
   # 1 VM svc-net par hote (bind9 + Kea + NetBox + agent reseau) sur SERVICES : .11, .12, .13...
@@ -260,7 +260,11 @@ locals {
     # backend et ia <-> stockage
     [{ from = "stockage", to = "backend" }, { from = "backend", to = "stockage" }],
     [{ from = "ia", to = "stockage" }, { from = "stockage", to = "ia" }],
-    # monitoring et traffic : en attente d'instructions, rien de plus
+    # monitoring et traffic surveillent tout
+    [for k in keys(local.all_vnets) : { from = k, to = "monitoring" } if k != "monitoring"],
+    [for k in keys(local.all_vnets) : { from = "monitoring", to = k } if k != "monitoring"],
+    [for k in keys(local.all_vnets) : { from = k, to = "traffic" } if k != "traffic"],
+    [for k in keys(local.all_vnets) : { from = "traffic", to = k } if k != "traffic"],
   )
 
   # pour chaque vnet : vnets joignables sans restriction de port
@@ -276,7 +280,7 @@ locals {
   pfsync_vnet = "gestion"
 
   # Acces SSH de la machine qui lance Terraform vers le bastion (rebond), par mot de passe
-  bastion_ssh_user = "debian"   # A ADAPTER : utilisateur du template Debian
+  bastion_ssh_user = "gandaladm"
 }
 
 data "xenorchestra_host" "hosts" {
@@ -360,7 +364,7 @@ module alpine {
   hosts = local.hosts_ids
   tenants = local.tenants
   tenant_nodes = local.tenant_nodes
-  tenant_network_ids = module.vnets.tenant_ids
+  #tenant_network_ids = module.vnets.tenant_ids
   transit_network_id = module.vnets.ids["transit"]
   transit_cidr = local.vnets["transit"].ip
   alpine_ips = local.alpine_ips

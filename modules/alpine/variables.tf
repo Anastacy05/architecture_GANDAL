@@ -24,7 +24,7 @@ variable tenants {
 variable tenant_nodes { type = map(number) }
 
 # tenantN -> id du reseau XCP-ng
-variable tenant_network_ids { type = map(string) }
+#variable tenant_network_ids { type = map(string) }
 
 variable transit_network_id { type = string }
 

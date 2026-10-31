@@ -40,12 +40,12 @@ resource "terraform_data" "private_network" {
 
 }
 
-resource "xenorchestra_network" "internal_network" {
-  for_each = var.internal_vnets
-  name_label = each.value.name
-  name_description = "${each.value.name} (créé par Terraform)"
-  pool_id = var.pool
-}
+# resource "xenorchestra_network" "internal_network" {
+#   for_each = var.internal_vnets
+#   name_label = each.value.name
+#   name_description = "${each.value.name} (créé par Terraform)"
+#   pool_id = var.pool
+#}
 
 
 # =========================================================================
@@ -65,6 +65,6 @@ output "ids" {
 }
 
 # Reseaux tenants (internes a un hote) : l'alpine de chaque noeud s'y branche par id
-output "tenant_ids" {
-    value = { for k, n in xenorchestra_network.internal_network : k => n.id }
-}
+# output "tenant_ids" {
+#     value = { for k, n in xenorchestra_network.internal_network : k => n.id }
+#}
