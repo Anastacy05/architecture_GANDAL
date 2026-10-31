@@ -28,10 +28,14 @@ data "xenorchestra_sr" "sr_local" {
 locals {
   nodes = { for i, h in var.hosts : tostring(i) => h }
 
-  # Tous les vnets sauf gateway (celui-ci est declaré en premier, à parti)
-  other_vnets = { for k, v in var.vnets : k => v if k != "gateway" }
+  infra_keys  = keys(var.vnets)
+  tenant_keys = keys(var.tenants)
 
-  # Config de chaque routeur, passee a Ansible : IP = .(noeud+1) sur CHAQUE vnet
+  # Tous les vnets d'infra sauf gestion (declare en premier : c'est la 1re patte, celle qui
+  # obtient son IP du DHCP du bastion unique au premier demarrage)
+  other_vnets = { for k, v in var.vnets : k => v if k != "gestion" }
+
+  # Config de chaque routeur, passee a Ansible : IP = .(noeud+1) sur CHAQUE vnet d'infra
   router_configs = {
     for n, _ in local.nodes : n => [
       for k, v in var.vnets : {
@@ -41,16 +45,56 @@ locals {
         ip     = cidrhost(v.ip, tonumber(n) + 1)
         prefix = v.prefix
         net    = v.ip
-        allow_to = [for d in var.allowed_links[k] : var.vnets[d].ip]
-        dns  = k != "services"
+        # destinations d'infra : une regle par reseau
+        allow_to = [for d in var.allowed_links[k] : var.vnets[d].ip if contains(local.infra_keys, d)]
+        # destinations tenants : une seule regle vers l'alias TENANT_NETS
+        allow_tenants = anytrue([for d in var.allowed_links[k] : contains(local.tenant_keys, d)])
+        # les VM de ce vnet utilisent le failover : le routeur doit repondre au ping
+        ping = contains(var.failover_vnets, k)
         dhcp = contains(var.dhcp_vnets_keys, k)
       }
     ]
   }
 
-  # IP du routeur sur le vnet gateway : c'est par la que Ansible le joint
-  gateway_ips = {
-    for n, _ in local.nodes : n => cidrhost(var.vnets["gateway"].ip, tonumber(n) + 1)
+  # Cote tenants : un pfSense recoit leur trafic sur l'interface TRANSIT (source = IP du tenant).
+  # Les flux autorises sont ceux de la matrice (identiques pour tous les tenants -> union).
+  tenant_allowed_to = distinct(flatten([
+    for t in local.tenant_keys : [
+      for d in var.allowed_links[t] : var.vnets[d].ip if contains(local.infra_keys, d)
+    ]
+  ]))
+
+  # Routes statiques : chaque tenant est joignable UNIQUEMENT via l'alpine de son noeud.
+  # Cette config est identique sur tous les pfSense (chaque pfSense route tous les tenants).
+  tenant_config = {
+    transit_iface = var.vnets["transit"].name
+    nets          = [for k in local.tenant_keys : var.tenants[k].ip]
+    allowed_to    = local.tenant_allowed_to
+    gateways = [
+      for n, ip in var.alpine_ips : {
+        name = "ALPINE_${n}"
+        ip   = ip
+      }
+    ]
+    routes = [
+      for k in local.tenant_keys : {
+        name    = var.tenants[k].name
+        network = var.tenants[k].ip
+        gateway = "ALPINE_${var.tenant_nodes[k]}"
+      }
+    ]
+  }
+
+  # Config commune a tous les routeurs : pfsync, passerelle par defaut (bastion)
+  system_config = {
+    pfsync_iface  = var.vnets[var.pfsync_vnet].name
+    gestion_iface = var.vnets["gestion"].name
+    bastion_ip    = var.bastion_gestion_ip
+  }
+
+  # IP du routeur sur GESTION : c'est par la que Ansible le joint (via le bastion unique)
+  gestion_ips = {
+    for n, _ in local.nodes : n => cidrhost(var.vnets["gestion"].ip, tonumber(n) + 1)
   }
 }
 
@@ -70,9 +114,10 @@ resource "xenorchestra_vm" "vm_routeur" {
   memory_max        = 1073741824
   hvm_boot_firmware = "bios"
 
+  # 1re patte = GESTION : DHCP du bastion d'emilia, puis joignable par Ansible
   network {
-    network_id  = var.network_ids["gateway"]
-    mac_address = var.router_macs[each.key]["gateway"]
+    network_id  = var.network_ids["gestion"]
+    mac_address = var.router_macs[each.key]["gestion"]
   }
   dynamic "network" {
     for_each = local.other_vnets
@@ -101,30 +146,42 @@ resource "terraform_data" "ansible_provisioning" {
   triggers_replace = {
     vm      = xenorchestra_vm.vm_routeur[each.key].id
     configs = sha1(jsonencode(local.router_configs[each.key]))
+    tenants = sha1(jsonencode(local.tenant_config))
+    system  = sha1(jsonencode(local.system_config))
     dhcp    = join(",", var.dhcp_server_ips)
     dns     = join(",", var.dns_server_ips)
   }
 
   provisioner "local-exec" {
-    # Un inventaire par noeud : les 3 runs tournent en parallele dans le meme dossier
+    interpreter = ["/bin/bash", "-c"]
+    # Un inventaire par noeud : les runs tournent en parallele dans le meme dossier.
+    # Rebond par le bastion unique, avec son mot de passe (sshpass requis sur la machine Terraform).
+    # Le mot de passe est ecrit dans un fichier temporaire 0600 (jamais dans la ligne de commande).
     command = <<-EOT
+      set -euo pipefail
+      umask 077
+      PASSFILE=$(mktemp)
+      trap 'rm -f "$PASSFILE" inventory-${each.key}.ini' EXIT
+      printf '%s' "$BASTION_SSH_PASSWORD" > "$PASSFILE"
+
+      PROXY="sshpass -f $PASSFILE ssh -W %h:%p -q -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o PubkeyAuthentication=no -o PreferredAuthentications=password $BASTION_SSH_USER@$BASTION_IP"
       printf '[pfsense]\nrouter ansible_host=%s ansible_user=admin ansible_ssh_pass=admin ansible_ssh_common_args=%s\n' \
-        "$ROUTER_IP" "'$SSH_ARGS'" > inventory-${each.key}.ini
+        "$ROUTER_IP" "'-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ProxyCommand=\"$PROXY\"'" > inventory-${each.key}.ini
       ansible-playbook -i inventory-${each.key}.ini playbook.yml
     EOT
 
     working_dir = "${path.module}/ansible"
 
     environment = {
-      ROUTER_IP         = local.gateway_ips[each.key]
-      VNET_CONFIGS_JSON = jsonencode(local.router_configs[each.key])
-      DHCP_SERVER_IP    = join(",", var.dhcp_server_ips)
-      DNS_SERVERS       = join(",", var.dns_server_ips)
-      SSH_ARGS = join(" ", [
-        "-o StrictHostKeyChecking=no",
-        "-o UserKnownHostsFile=/dev/null",
-        "-o ProxyCommand=\"ssh -W %h:%p -q -i ${var.bastion_ssh_key} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${var.bastion_ssh_user}@${var.bastion_wan_ips[each.key]}\"",
-      ])
+      ROUTER_IP            = local.gestion_ips[each.key]
+      VNET_CONFIGS_JSON    = jsonencode(local.router_configs[each.key])
+      TENANT_CONFIG_JSON   = jsonencode(local.tenant_config)
+      SYSTEM_CONFIG_JSON   = jsonencode(local.system_config)
+      DHCP_SERVER_IP       = join(",", var.dhcp_server_ips)
+      DNS_SERVERS          = join(",", var.dns_server_ips)
+      BASTION_IP           = var.bastion_wan_ip
+      BASTION_SSH_USER     = var.bastion_ssh_user
+      BASTION_SSH_PASSWORD = var.bastion_ssh_password
     }
   }
 }
@@ -137,6 +194,6 @@ output "ids" {
   value = { for k, vm in xenorchestra_vm.vm_routeur : k => vm.id }
 }
 
-output "gateway_ips" {
-  value = local.gateway_ips
+output "gestion_ips" {
+  value = local.gestion_ips
 }

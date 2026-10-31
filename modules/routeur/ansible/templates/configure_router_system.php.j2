@@ -1,0 +1,39 @@
+<?php
+require_once("config.inc");
+require_once("interfaces.inc");
+require_once("filter.inc");
+
+global $config;
+
+// Identifiant pfSense (wan, lan, optN) d'une interface a partir de sa description
+function if_id_by_descr($descr) {
+    global $config;
+    foreach ($config['interfaces'] as $id => $if) {
+        if (isset($if['descr']) && $if['descr'] === $descr) {
+            return $id;
+        }
+    }
+    return null;
+}
+
+// --- pfsync : synchronisation de la table d'etats entre tous les routeurs ---
+$syncif = if_id_by_descr('{{ system_config.pfsync_iface }}');
+if ($syncif === null) {
+    fwrite(STDERR, "Interface pfsync introuvable : {{ system_config.pfsync_iface }}\n");
+    exit(1);
+}
+$config['hasync']['pfsyncenabled'] = 'on';
+$config['hasync']['pfsyncinterface'] = $syncif;
+// Pair vide = multicast : chaque routeur envoie ses etats a tous les autres (autant de routeurs que d hotes)
+$config['hasync']['pfsyncpeerip'] = '';
+
+// --- NAT sortant desactive : c'est le bastion qui fait le NAT vers Internet ---
+$config['nat']['outbound']['mode'] = 'disabled';
+
+write_config("pfsync + NAT sortant desactive");
+
+if (function_exists('interfaces_sync_setup')) {
+    interfaces_sync_setup();
+}
+filter_configure();
+?>

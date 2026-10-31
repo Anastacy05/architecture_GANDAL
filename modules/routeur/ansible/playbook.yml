@@ -10,10 +10,68 @@
     vnet_configs: "{{ lookup('env', 'VNET_CONFIGS_JSON') | from_json }}"
     dhcp_server_ip: "{{ lookup('env', 'DHCP_SERVER_IP') }}"
     dns_servers: "{{ lookup('env', 'DNS_SERVERS') }}"
+    # Reseaux users : alpines (gateways), routes statiques, alias et flux de la matrice
+    tenant_config: "{{ lookup('env', 'TENANT_CONFIG_JSON') | from_json }}"
+    # pfsync, passerelle par defaut (bastion)
+    system_config: "{{ lookup('env', 'SYSTEM_CONFIG_JSON') | from_json }}"
+    # "Internet" = tout l'espace IPv4 public (complement de RFC1918, CGNAT, loopback, link-local, multicast/reserve).
+    # Alias positif : evite l'inversion de match, ambigue avec les sous-reseaux d'interface.
+    internet_nets:
+      - "1.0.0.0/8"
+      - "2.0.0.0/7"
+      - "4.0.0.0/6"
+      - "8.0.0.0/7"
+      - "11.0.0.0/8"
+      - "12.0.0.0/6"
+      - "16.0.0.0/4"
+      - "32.0.0.0/3"
+      - "64.0.0.0/3"
+      - "96.0.0.0/6"
+      - "100.0.0.0/10"
+      - "100.128.0.0/9"
+      - "101.0.0.0/8"
+      - "102.0.0.0/7"
+      - "104.0.0.0/5"
+      - "112.0.0.0/5"
+      - "120.0.0.0/6"
+      - "124.0.0.0/7"
+      - "126.0.0.0/8"
+      - "128.0.0.0/3"
+      - "160.0.0.0/5"
+      - "168.0.0.0/8"
+      - "169.0.0.0/9"
+      - "169.128.0.0/10"
+      - "169.192.0.0/11"
+      - "169.224.0.0/12"
+      - "169.240.0.0/13"
+      - "169.248.0.0/14"
+      - "169.252.0.0/15"
+      - "169.255.0.0/16"
+      - "170.0.0.0/7"
+      - "172.0.0.0/12"
+      - "172.32.0.0/11"
+      - "172.64.0.0/10"
+      - "172.128.0.0/9"
+      - "173.0.0.0/8"
+      - "174.0.0.0/7"
+      - "176.0.0.0/4"
+      - "192.0.0.0/9"
+      - "192.128.0.0/11"
+      - "192.160.0.0/13"
+      - "192.169.0.0/16"
+      - "192.170.0.0/15"
+      - "192.172.0.0/14"
+      - "192.176.0.0/12"
+      - "192.192.0.0/10"
+      - "193.0.0.0/8"
+      - "194.0.0.0/7"
+      - "196.0.0.0/6"
+      - "200.0.0.0/5"
+      - "208.0.0.0/4"
 
   tasks:
     # --- PHASE 0 : attendre que pfSense soit joignable (via le bastion) ---
-    # Au 1er démarrage, il obtient son IP du DHCP du bastion : ça prend un moment
+    # Au 1er démarrage, il obtient son IP sur GESTION du DHCP du bastion UNIQUE (emilia) : ça prend un moment
     - name: Attendre la connexion SSH
       ansible.builtin.wait_for_connection:
         delay: 10
@@ -56,8 +114,8 @@
         ipv4_prefixlen: "{{ item.prefix }}"
       loop: "{{ vnet_configs }}"
 
-    # --- PHASE 4 : ACTIVER le DHCP Relay ---
-    - name: Générer le script PHP du relay avec les vraies interfaces
+    # --- PHASE 4 : DHCP Relay (reseaux d'infra ; les tenants sont relayes par leurs alpines) ---
+    - name: Générer le script PHP du relay
       ansible.builtin.template:
         src: templates/enable_dhcp_relay.php.j2
         dest: /tmp/enable_dhcp_relay.php
@@ -65,17 +123,41 @@
 
     - name: Exécuter activation du relay
       ansible.builtin.shell: |
-        pfSsh.php playback /tmp/enable_dhcp_relay.php
+        php -f /tmp/enable_dhcp_relay.php
       register: relay_result
       changed_when: true
 
-    # --- PHASE 5 : Règles de pare-feu ---
+    # --- PHASE 5 : pfsync, NAT sortant, passerelle par defaut ---
+    # pfsync : les 3 routeurs partagent leur table d'etats (multicast sur le vnet pfsync). Un echange
+    # qui sort par un routeur et revient par un autre y retrouve son etat au lieu d'etre rejete.
+    - name: Générer le script PHP système (pfsync, NAT sortant)
+      ansible.builtin.template:
+        src: templates/configure_router_system.php.j2
+        dest: /tmp/configure_router_system.php
+        mode: '0644'
+
+    - name: Activer pfsync et désactiver le NAT sortant (le bastion fait le NAT)
+      ansible.builtin.shell: |
+        php -f /tmp/configure_router_system.php
+      register: system_result
+      changed_when: true
+
+    - name: Passerelle par défaut = bastion (sortie Internet)
+      pfsensible.core.pfsense_gateway:
+        name: BASTION
+        interface: "{{ system_config.gestion_iface }}"
+        ipprotocol: inet
+        gateway: "{{ system_config.bastion_ip }}"
+        defaultgw: true
+        descr: "Bastion (NAT vers Internet)"
+        state: present
+
+    # --- PHASE 6 : Règles de pare-feu ---
     # pfSense filtre à l'ENTRÉE de chaque interface et bloque par défaut :
-    # on n'ajoute donc que des règles "pass", une par flux autorisé
-    # (matrice définie dans le main.tf racine, local.allowed_links).
-    - name: Autoriser TCP du vnet gateway vers le routeur (Ansible + toute communication venant de l'exterieur)
+    # on n'ajoute donc que des règles "pass", une par flux autorisé.
+    - name: Autoriser TCP du vnet gestion vers le routeur (Ansible via le bastion + administration)
       pfsensible.core.pfsense_rule:
-        name: "allow gateway tcp to routeur {{ item.name }}"
+        name: "allow gestion tcp to routeur {{ item.name }}"
         action: pass
         interface: "{{ item.name }}"
         ipprotocol: inet
@@ -83,14 +165,13 @@
         source: "{{ item.net }}"
         destination: "{{ item.ip }}"
         state: present
-      loop: "{{ vnet_configs | selectattr('role', 'equalto', 'gateway') | list }}"
+      loop: "{{ vnet_configs | selectattr('role', 'equalto', 'gestion') | list }}"
       loop_control:
         label: "{{ item.name }}"
 
-    # Les VM clientes testent leurs routeurs par ping pour basculer de passerelle :
-    # sans cette règle, pfSense bloque le ping vers sa propre IP et tous les
-    # routeurs paraissent morts.
-    - name: Autoriser le ping vers le routeur depuis tous les vnets pour les scripts de bascule
+    # Les VM qui utilisent le script de bascule testent leurs routeurs par ping :
+    # sans cette règle, pfSense bloque le ping vers sa propre IP et tous les routeurs paraissent morts.
+    - name: Ping des routeurs depuis les vnets dont les VM utilisent le failover
       pfsensible.core.pfsense_rule:
         name: "allow ping routeur {{ item.name }}"
         action: pass
@@ -100,17 +181,17 @@
         source: "{{ item.net }}"
         destination: "{{ item.ip }}"
         state: present
-      loop: "{{ vnet_configs | list }}"
+      loop: "{{ vnet_configs | selectattr('ping') | list }}"
       loop_control:
         label: "{{ item.name }}"
 
-    # Alias : une seule règle par interface pour tous les DNS / tous les DHCP
+    # Alias
     - name: Alias des serveurs DNS
       pfsensible.core.pfsense_alias:
         name: DNS_SERVERS
         type: host
-        address: "{{ dns_servers }}"
-        descr: "3 DNS (master + slaves)"
+        address: "{{ dns_servers | replace(',', ' ') }}"
+        descr: "svc-net : DNS master + slaves"
         state: present
 
     - name: Alias des serveurs DHCP
@@ -118,37 +199,153 @@
         name: DHCP_SERVERS
         type: host
         address: "{{ dhcp_server_ip | replace(',', ' ') }}"
-        descr: "2 DHCP (HA)"
+        descr: "svc-net : DHCP Kea (primary, standby, backup)"
         state: present
 
-    - name: Tous les vnets vers les DNS (port 53)
+    - name: Alias Internet (espace IPv4 public)
+      pfsensible.core.pfsense_alias:
+        name: INTERNET_NETS
+        type: network
+        address: "{{ internet_nets }}"
+        descr: "IPv4 publique (hors RFC1918 et plages speciales)"
+        state: present
+
+    # Internet : tous les vnets, via la passerelle par defaut (bastion) ; le retour passe par pfsync
+    - name: Tous les vnets vers Internet (via le bastion)
       pfsensible.core.pfsense_rule:
-        name: "allow {{ item.name }} -> DNS"
+        name: "allow {{ item.name }} -> Internet"
         action: pass
         interface: "{{ item.name }}"
         ipprotocol: inet
-        protocol: tcp/udp
+        protocol: any
         source: "{{ item.net }}"
-        destination: "DNS_SERVERS:53"
+        destination: INTERNET_NETS
         state: present
-      loop: "{{ vnet_configs | selectattr('dns') | list }}"
+      loop: "{{ vnet_configs }}"
       loop_control:
         label: "{{ item.name }}"
 
-    - name: Vnets de dhcp_vnets vers les DHCP (renouvellement de bail, port 67)
+    # Reponses DHCP : le relais (pfSense ou alpine) envoie la requete depuis sa propre IP, mais Kea repond
+    # a l'IP de relais (giaddr) : ce n'est donc pas la meme paire d'adresses, l'etat ne la couvre pas.
+    # 1) la reponse arrive sur le vnet du client, par un autre routeur que celui du relais
+    - name: Reponses DHCP des Kea vers les relais, a l'arrivee sur chaque vnet relaye
       pfsensible.core.pfsense_rule:
-        name: "allow {{ item.name }} -> DHCP"
+        name: "allow DHCP replies -> {{ item.name }}"
         action: pass
         interface: "{{ item.name }}"
         ipprotocol: inet
         protocol: udp
-        source: "{{ item.net }}"
-        destination: "DHCP_SERVERS:67"
+        source: "DHCP_SERVERS:67"
+        destination: "{{ item.net }}:67"
         state: present
-      loop: "{{ vnet_configs | selectattr('dhcp') | list }}"
+      loop: "{{ vnet_configs | selectattr('dhcp') | rejectattr('role', 'equalto', 'transit') | list }}"
       loop_control:
         label: "{{ item.name }}"
 
+    # 2) la reponse sort de Kea : a l'entree de SERVICES, vers chaque vnet relaye
+    - name: Reponses DHCP a la sortie de SERVICES vers les vnets relayes
+      pfsensible.core.pfsense_rule:
+        name: "allow DHCP replies services -> {{ item.name }}"
+        action: pass
+        interface: "{{ vnet_configs | selectattr('role', 'equalto', 'services') | map(attribute='name') | first }}"
+        ipprotocol: inet
+        protocol: udp
+        source: "DHCP_SERVERS:67"
+        destination: "{{ item.net }}:67"
+        state: present
+      loop: "{{ vnet_configs | selectattr('dhcp') | rejectattr('role', 'equalto', 'transit') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    # --- PHASE 7 : Reseaux users (routes par les alpines) ---
+    # Les tenants n'ont PAS de patte sur pfSense : chacun est joignable via l'alpine de son
+    # noeud, par une route statique. Leur trafic arrive sur l'interface TRANSIT avec pour
+    # source l'IP du tenant (alias TENANT_NETS).
+    - name: Alias des reseaux users
+      pfsensible.core.pfsense_alias:
+        name: TENANT_NETS
+        type: network
+        address: "{{ tenant_config.nets }}"
+        descr: "Reseaux users (routes par les alpines)"
+        state: present
+
+    - name: Passerelle vers chaque alpine (sur transit)
+      pfsensible.core.pfsense_gateway:
+        name: "{{ item.name }}"
+        interface: "{{ tenant_config.transit_iface }}"
+        ipprotocol: inet
+        gateway: "{{ item.ip }}"
+        monitor_disable: true
+        descr: "Alpine {{ item.name }}"
+        state: present
+      loop: "{{ tenant_config.gateways }}"
+      loop_control:
+        label: "{{ item.name }} {{ item.ip }}"
+
+    - name: Route statique vers chaque reseau user via l'alpine de son noeud
+      pfsensible.core.pfsense_route:
+        network: "{{ item.network }}"
+        gateway: "{{ item.gateway }}"
+        descr: "{{ item.name }} via {{ item.gateway }}"
+        state: present
+      loop: "{{ tenant_config.routes }}"
+      loop_control:
+        label: "{{ item.network }} -> {{ item.gateway }}"
+
+    # Retour : les vnets d'infra autorises a joindre les tenants
+    - name: Vnets d'infra vers les reseaux users (matrice)
+      pfsensible.core.pfsense_rule:
+        name: "allow {{ item.name }} -> TENANT_NETS"
+        action: pass
+        interface: "{{ item.name }}"
+        ipprotocol: inet
+        protocol: any
+        source: "{{ item.net }}"
+        destination: TENANT_NETS
+        state: present
+      loop: "{{ vnet_configs | selectattr('allow_tenants') | list }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    # Aller : les tenants vers l'infra, filtres a l'entree de TRANSIT.
+    # Aucune regle TENANT_NETS -> TENANT_NETS : un user ne parle jamais a un autre user
+    # (meme celui d'un autre noeud, qui passerait par ici).
+    - name: Reseaux users vers les vnets d'infra autorises (matrice)
+      pfsensible.core.pfsense_rule:
+        name: "allow TENANTS -> {{ item }}"
+        action: pass
+        interface: "{{ tenant_config.transit_iface }}"
+        ipprotocol: inet
+        protocol: any
+        source: TENANT_NETS
+        destination: "{{ item }}"
+        state: present
+      loop: "{{ tenant_config.allowed_to }}"
+
+    - name: Reseaux users vers Internet (via le bastion)
+      pfsensible.core.pfsense_rule:
+        name: "allow TENANTS -> Internet"
+        action: pass
+        interface: "{{ tenant_config.transit_iface }}"
+        ipprotocol: inet
+        protocol: any
+        source: TENANT_NETS
+        destination: INTERNET_NETS
+        state: present
+
+    # Reponses DHCP vers les alpines : Kea repond a l'IP de relais (.1 du tenant, portee par l'alpine)
+    - name: Reponses DHCP a la sortie de SERVICES vers les reseaux users
+      pfsensible.core.pfsense_rule:
+        name: "allow DHCP replies services -> TENANTS"
+        action: pass
+        interface: "{{ vnet_configs | selectattr('role', 'equalto', 'services') | map(attribute='name') | first }}"
+        ipprotocol: inet
+        protocol: udp
+        source: "DHCP_SERVERS:67"
+        destination: "TENANT_NETS:67"
+        state: present
+
+    # --- PHASE 8 : flux inter-vnets de la matrice ---
     - name: Autoriser les flux inter-vnets de la matrice
       pfsensible.core.pfsense_rule:
         name: "allow {{ item.0.name }} -> {{ item.1 }}"

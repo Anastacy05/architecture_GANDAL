@@ -3,7 +3,7 @@
 #
 # Le bastion garde sa route par defaut sur enX0 (WAN, DHCP). Ce script ne gere
 # QUE la route vers les reseaux internes (INTERNAL_CIDR), qui doit passer par
-# un routeur pfSense du vnet gateway.
+# un routeur pfSense du vnet gestion.
 #
 # - /etc/failover/gateways-list : une IP de routeur par ligne (.1 a .10)
 # - /etc/failover/node-id       : numero du noeud (0, 1, 2...) = index dans la

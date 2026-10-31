@@ -4,22 +4,41 @@ require_once("services.inc");
 
 global $config;
 
-// Active le service relay
-$config['dhcrelay']['enable'] = true;
+// Identifiant pfSense (wan, lan, optN) d'une interface a partir de sa description
+function if_id_by_descr($descr) {
+    global $config;
+    foreach ($config['interfaces'] as $id => $if) {
+        if (isset($if['descr']) && $if['descr'] === $descr) {
+            return $id;
+        }
+    }
+    return null;
+}
 
-// Downstream : toutes les interfaces sauf services (serveurs DHCP) et gateway
-// (le DHCP du vnet gateway est assuré par les bastions, pour les routeurs eux-mêmes au premier démarrage)
-$config['dhcrelay']['interface'] = [
-{% for item in vnet_configs if item.role not in ['services', 'gateway'] %}
-    '{{ mac_to_interface[item.mac | replace(':', '') | lower] }}',
+// Downstream : les vnets qui ont un pool DHCP dans Kea. Pas services (serveurs DHCP), pas gestion
+// (DHCP assure par le bastion unique d'emilia pour les routeurs eux-memes), pas transit (les alpines
+// relaient en unicast). Les reseaux users sont relayes par l'alpine de leur noeud.
+$descrs = [
+{% for item in vnet_configs if item.dhcp and item.role != 'transit' %}
+    '{{ item.name }}',
 {% endfor %}
 ];
+$ids = [];
+foreach ($descrs as $d) {
+    $id = if_id_by_descr($d);
+    if ($id !== null) {
+        $ids[] = $id;
+    }
+}
 
-// Upstream : IP de la VM DHCP dans le VNET services
-$config['dhcrelay']['server'] = ['{{ dhcp_server_ip }}'];
+// pfSense stocke la liste des interfaces et des serveurs en chaines separees par des virgules
+$config['dhcrelay']['enable'] = true;
+$config['dhcrelay']['interface'] = implode(',', $ids);
+// Upstream : les Kea des svc-net dans le vnet services (le standby et les backups ne repondent pas)
+$config['dhcrelay']['server'] = '{{ dhcp_server_ip }}';
+// agentoption : sa simple presence l'active, on la supprime
+unset($config['dhcrelay']['agentoption']);
 
-$config['dhcrelay']['agentoption'] = false;
-
-write_config("DHCP Relay activé");
+write_config("DHCP Relay active");
 services_dhcrelay_configure();
 ?>
